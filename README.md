@@ -1,5 +1,6 @@
 # TLS-chat
 ну короче пока вот здесь буду писать когда что и зач добавил 
+
 @startuml
 skinparam classAttributeIconSize 0
 
