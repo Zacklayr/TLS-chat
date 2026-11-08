@@ -64,7 +64,13 @@ TLS-чат — TLS арқылы қорғалған корпоративтік м
 3. **Core:** TLS байланысы (`SslContextFactory`), хабарлама протоколы (`Message`), хэштеу (`PasswordHasher`).
 4. **Persistence:** SQLite репозиторийлері.
 
-Екі клиент те бірдей Application және Core қабаттарын пайдаланады, сондықтан бизнес-логика қайталанбайды. Барлық қосылым тек TLS арқылы жүреді, ашық HTTP және шифрланбаған TCP қолдау көрсетілмейді.
+Болашақта екі клиент те бірдей Application және Core қабаттарын пайдалануы керек. Қазіргі кезеңде нақты клиент пен сервер әлі жоқ; `SslContextFactory` тек TLS-контексттерін құруға арналған негіз болып табылады.
+
+### Негізгі бағдарламалау паттерні: Observer
+
+Хабарламаларды клиенттерге тарату үшін жобаның негізгі паттерні ретінде **Observer** таңдалды. `MessageBroadcaster` — хабарлама жариялаушысы (Subject), ал `MessageListener` — бақылаушы (Observer). Жаңа клиент қосылғанда ол listener ретінде тіркеледі, ал хабарлама келгенде `broadcast` барлық тіркелген клиенттерге шақырылады. Сондықтан хабар тарату логикасы нақты клиенттерге тәуелді болмайды.
+
+Жаңа чат функциялары осы ережені сақтайды: хабарлама тікелей басқа клиентке жіберілмейді, алдымен Subject-ке беріледі, содан кейін барлық Observer-лерге таратылады.
 
 ## 6. UML диаграммалары
 
@@ -109,6 +115,16 @@ classDiagram
       +run() void
       +send(message) void
     }
+    class MessageBroadcaster {
+      -listeners List~MessageListener~
+      +addListener(listener) void
+      +removeListener(listener) void
+      +broadcast(message) void
+    }
+    class MessageListener {
+      <<interface>>
+      +onMessage(message) void
+    }
     class AuthService {
       +login(username, password) boolean
     }
@@ -139,6 +155,9 @@ classDiagram
     ChatServer *-- MessageService
     TlsGateway --> ClientHandler
     TlsGateway ..> SslContextFactory
+    ClientHandler ..|> MessageListener
+    MessageBroadcaster o-- MessageListener
+    MessageBroadcaster --> Message
     ClientHandler --> AuthService
     ClientHandler --> MessageService
     AuthService --> PasswordHasher
@@ -227,7 +246,7 @@ tls-chat/
 │   │   ├── ChatServer.java
 │   │   ├── ClientHandler.java
 │   │   ├── Message.java
-│   │   └── SslContextFactory.java
+│   │   └── ...
 │   └── test/java/kz/.../tlschat/
 ├── .github/workflows/ci.yml
 ├── .gitignore
@@ -240,8 +259,8 @@ tls-chat/
 
 ## 9. Қауіпсіздік және шектеулер
 
-- Байланыс тек TLSv1.3 арқылы жүреді. Шифрланбаған қосылым жоқ.
-- Клиент сертификатты және hostname-ді міндетті түрде тексереді. "Барлығына сенетін" (trust-all) TrustManager жазылмайды.
+- Жоспарланған байланыс TLSv1.3 арқылы қорғалуы тиіс. Қазіргі кезеңде нақты желілік қосылым іске қосылмаған.
+- Клиенттік контекст сенімді `TrustStore` арқылы құрылады; "барлығына сенетін" (trust-all) TrustManager қолданылмайды.
 - Парольдер PBKDF2 арқылы хэштеледі, түпнұсқа пароль сақталмайды.
 - Кілттер, парольдер, `.p12` және `.crt` файлдары репозиторийге түспейді, `.gitignore` арқылы қорғалады.
 - Өзі қол қойған сертификат тек оқу мақсатында. Өндірісте сенімді CA қажет.
@@ -263,7 +282,7 @@ tls-chat/
 
 ## 12. Тесттер жоспары
 
-JUnit 5 арқылы кемінде 20 тест жазылады. Сертификат тесттің ішінде `@TempDir` арқылы уақытша жасалады, репозиторийде құпия файл болмайды.
+Кемінде 20 JUnit 5 тесті жоспарланған. Қазіргі кезеңде функционалдық тесттер әлі жазылмаған. Сертификат тесттің ішінде `@TempDir` арқылы уақытша жасалады, репозиторийде құпия файл болмайды.
 
 - KeyStore: дұрыс файл, қате пароль, жоқ файл (3 тест)
 - SSLContext: TLSv1.3 протоколы, серверлік және клиенттік контекст (3 тест)
