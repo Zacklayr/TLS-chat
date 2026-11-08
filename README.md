@@ -154,71 +154,32 @@ flowchart LR
 
 ```mermaid
 classDiagram
-    class ChatServer {
-      +start() void
-      +stop() void
-    }
     class SslContextFactory {
-      +serverContext(keystore, password) SSLContext
-      +clientContext(truststore, password) SSLContext
-    }
-    class TlsGateway {
-      +accept() void
-    }
-    class ClientHandler {
-      +run() void
-      +send(message) void
+      +serverContext(path, password) SSLContext
+      +clientContext(path, password) SSLContext
     }
     class MessageBroadcaster {
-      -listeners List~MessageListener~
-      +addListener(listener) void
-      +removeListener(listener) void
-      +broadcast(message) void
+      -listeners CopyOnWriteArrayList
+      +addListener(listener)
+      +removeListener(listener)
+      +broadcast(message)
     }
     class MessageListener {
       <<interface>>
-      +onMessage(message) void
-    }
-    class AuthService {
-      +login(username, password) boolean
-    }
-    class PasswordHasher {
-      +hash(password, salt) byte[]
-      +verify(password, stored, salt) boolean
-    }
-    class MessageService {
-      +post(sender, text) Message
-      +history(limit) List
+      +onMessage(message)
     }
     class Message {
-      -sender String
-      -text String
-      -sentAt Instant
-      +parse(line) Message
-      +toLine() String
+      +sender String
+      +text String
+      +sentAt Instant
     }
-    class UserRepository {
-      <<interface>>
-      +findByUsername(name) Optional
-      +save(user) void
-    }
-    class SqliteUserRepository
 
-    ChatServer *-- TlsGateway
-    ChatServer *-- AuthService
-    ChatServer *-- MessageService
-    TlsGateway --> ClientHandler
-    TlsGateway ..> SslContextFactory
-    ClientHandler ..|> MessageListener
     MessageBroadcaster o-- MessageListener
     MessageBroadcaster --> Message
-    ClientHandler --> AuthService
-    ClientHandler --> MessageService
-    AuthService --> PasswordHasher
-    AuthService --> UserRepository
-    MessageService --> Message
-    SqliteUserRepository ..|> UserRepository
+    MessageListener ..> Message
 ```
+
+Диаграмма показывает текущие реализованные классы. `SslContextFactory` создаёт TLS-контексты, `Message` хранит сообщение, а `MessageBroadcaster` рассылает его всем зарегистрированным `MessageListener` по паттерну **Observer**. Классы пользователей, регистрации, ролей, чатов и SQLite будут добавлены на следующих этапах.
 
 ### 6.3 Sequence диаграммасы: TLS рукопожатие және кіру
 
