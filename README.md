@@ -154,32 +154,58 @@ flowchart LR
 
 ```mermaid
 classDiagram
+    class ChatServer {
+      +start() void
+      +stop() void
+    }
     class SslContextFactory {
-      +serverContext(path, password) SSLContext
-      +clientContext(path, password) SSLContext
+      +serverContext(keystore, password) SSLContext
+      +clientContext(truststore, password) SSLContext
     }
-    class MessageBroadcaster {
-      -listeners CopyOnWriteArrayList
-      +addListener(listener)
-      +removeListener(listener)
-      +broadcast(message)
+    class TlsGateway {
+      +accept() void
     }
-    class MessageListener {
-      <<interface>>
-      +onMessage(message)
+    class ClientHandler {
+      +run() void
+      +send(message) void
+    }
+    class AuthService {
+      +login(username, password) boolean
+    }
+    class PasswordHasher {
+      +hash(password, salt) byte[]
+      +verify(password, stored, salt) boolean
+    }
+    class MessageService {
+      +post(sender, text) Message
+      +history(limit) List
     }
     class Message {
-      +sender String
-      +text String
-      +sentAt Instant
+      -sender String
+      -text String
+      -sentAt Instant
+      +parse(line) Message
+      +toLine() String
     }
+    class UserRepository {
+      <<interface>>
+      +findByUsername(name) Optional
+      +save(user) void
+    }
+    class SqliteUserRepository
 
-    MessageBroadcaster o-- MessageListener
-    MessageBroadcaster --> Message
-    MessageListener ..> Message
+    ChatServer *-- TlsGateway
+    ChatServer *-- AuthService
+    ChatServer *-- MessageService
+    TlsGateway --> ClientHandler
+    TlsGateway ..> SslContextFactory
+    ClientHandler --> AuthService
+    ClientHandler --> MessageService
+    AuthService --> PasswordHasher
+    AuthService --> UserRepository
+    MessageService --> Message
+    SqliteUserRepository ..|> UserRepository
 ```
-
-Диаграмма показывает текущие реализованные классы. `SslContextFactory` создаёт TLS-контексты, `Message` хранит сообщение, а `MessageBroadcaster` рассылает его всем зарегистрированным `MessageListener` по паттерну **Observer**. Классы пользователей, регистрации, ролей, чатов и SQLite будут добавлены на следующих этапах.
 
 ### 6.3 Sequence диаграммасы: TLS рукопожатие және кіру
 
