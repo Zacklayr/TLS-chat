@@ -284,47 +284,7 @@
 <script>
   const ME = "alice";
 
-  const chats = [
-    { id: "general", type: "group", name: "Общий", color: "c-blue", unread: 3, pinned: true, members: 12, online: 3,
-      msgs: [
-        { day: "Сегодня" },
-        { sys: "bob добавлен в канал" },
-        { from: "bob",   color: "c-green",  text: "Всем доброе утро", t: "09:00" },
-        { from: "carol", color: "c-pink",   text: "Доброе! Сервер сегодня поднимали?", t: "09:02" },
-        { from: "bob",   color: "c-green",  text: "да, сертификат проверен, всё ок", t: "09:03" },
-        { from: ME, out: true, text: "отлично, спасибо!", t: "10:12", read: true },
-        { from: "carol", color: "c-pink",   text: "@alice посмотри, пожалуйста, тесты SslContextFactory", t: "10:14", mention: true }
-      ] },
-    { id: "dev", type: "group", name: "Разработка", color: "c-purple", unread: 2, pinned: true, members: 5, online: 2,
-      msgs: [
-        { day: "Сегодня" },
-        { from: "admin", color: "c-orange", text: "релиз v0.9 в ветке main", t: "10:15" },
-        { from: "carol", color: "c-pink",   text: "тесты на SslContextFactory зелёные", t: "10:16" }
-      ] },
-    { id: "bob", type: "direct", name: "Bob", color: "c-green", online: true, unread: 1,
-      msgs: [
-        { day: "Вчера" },
-        { from: "bob", color: "c-green", text: "Глянешь PR с PBKDF2?", t: "18:40" },
-        { from: ME, out: true, text: "да, вечером", t: "18:55", read: true },
-        { from: "bob", color: "c-green", text: "принято, жду", t: "19:01" }
-      ] },
-    { id: "carol", type: "direct", name: "Carol", color: "c-pink", online: true, unread: 0,
-      msgs: [
-        { day: "Сегодня" },
-        { from: "carol", color: "c-pink", text: "Скинь, пожалуйста, новый сертификат для телефона", t: "08:30" },
-        { from: ME, out: true, text: "сейчас пришлю файл", t: "08:33", read: true }
-      ] },
-    { id: "admin", type: "direct", name: "Admin", color: "c-orange", online: false, unread: 0,
-      msgs: [
-        { day: "Пятница" },
-        { from: "admin", color: "c-orange", text: "Аккаунт для тебя создан", t: "12:00" }
-      ] },
-    { id: "random", type: "group", name: "Флудилка", color: "c-blue", unread: 0, members: 20, online: 5,
-      msgs: [
-        { day: "Понедельник" },
-        { from: "bob", color: "c-green", text: "кто идёт в обед?", t: "12:10" }
-      ] }
-  ];
+  let chats = [];
 
   let current = null;
   let filter = "all";
@@ -336,6 +296,21 @@
 
   // последнее сообщение чата (для превью)
   const lastOf = c => [...c.msgs].reverse().find(m => !m.day && !m.sys);
+
+  async function loadChats() {
+    const response = await fetch("/api/chats");
+    if (!response.ok) throw new Error("Не удалось загрузить список чатов");
+    chats = await response.json();
+    chats.forEach(c => c.msgs = []);
+    renderChats();
+    await openChat("general");
+  }
+
+  async function loadMessages(chat) {
+    const response = await fetch(`/api/chats/${encodeURIComponent(chat.id)}`);
+    if (!response.ok) throw new Error("Не удалось загрузить историю чата");
+    chat.msgs = await response.json();
+  }
 
   function visibleChats() {
     const q = $("search").value.trim().toLowerCase();
@@ -410,35 +385,33 @@
     $("app").classList.add("chat-open");
   }
 
-  function openChat(id) {
+  async function openChat(id) {
     current = id;
     const c = chats.find(x => x.id === id);
+    if (!c) return;
     c.unread = 0;
+    await loadMessages(c);
     renderChats();
     renderConv();
   }
 
-  function send() {
+  async function send() {
     const text = $("input").value.trim();
     if (!text || !current) return;
     const c = chats.find(x => x.id === current);
-    const msg = { from: ME, out: true, text, t: now(), read: false };
-    c.msgs.push(msg);
+    const response = await fetch(`/api/chats/${encodeURIComponent(c.id)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sender: ME, text })
+    });
+    if (!response.ok) {
+      $("typing").textContent = "Ошибка отправки сообщения";
+      return;
+    }
+    c.msgs.push(await response.json());
     $("input").value = "";
     renderChats();
     renderConv();
-
-    // имитация: сообщение прочитано, затем ответ собеседника
-    setTimeout(() => { msg.read = true; renderChats(); if (current === c.id) renderConv(); }, 800);
-    $("typing").textContent = c.type === "direct" ? `${c.name} печатает…` : "";
-    setTimeout(() => {
-      $("typing").textContent = "";
-      const reply = { from: c.type === "direct" ? c.name.toLowerCase() : "bob",
-                      color: c.color, text: "принято ✓", t: now() };
-      c.msgs.push(reply);
-      if (current === c.id) renderConv();
-      renderChats();
-    }, 1800);
   }
 
   $("chats").addEventListener("click", e => {
@@ -458,8 +431,10 @@
   });
   $("back").addEventListener("click", () => $("app").classList.remove("chat-open"));
 
-  renderChats();
-  openChat("general");
+  loadChats().catch(error => {
+    $("typing").textContent = error.message;
+    console.error(error);
+  });
 </script>
 </body>
 </html> 
