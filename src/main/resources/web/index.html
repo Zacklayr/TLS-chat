@@ -249,7 +249,14 @@
       <div class="empty" id="empty">
         <div>
           <div class="big">TLS CHAT</div>
-          <div>Выберите чат, чтобы начать переписку</div>
+          <div>Регистрация обязательна для доступа</div>
+          <form id="registration" style="display:grid;gap:6px;max-width:260px;margin:14px auto 0">
+            <input class="search" id="username" required minlength="3" maxlength="32"
+              pattern="[A-Za-z0-9_]+" placeholder="Логин">
+            <input class="search" id="displayName" required maxlength="80" placeholder="Ваше имя">
+            <button class="btn primary" type="submit">Подать заявку</button>
+            <small id="registrationStatus"></small>
+          </form>
           <span class="tls-badge">🔒 TLS 1.3</span>
         </div>
       </div>
@@ -277,14 +284,13 @@
   <div class="statusbar">
     <span class="ok">● TLS 1.3 · защищённое соединение</span>
     <span class="spacer"></span>
-    <span class="hide-m" id="whoami">alice</span>
+    <span class="hide-m" id="whoami">регистрация не выполнена</span>
   </div>
 </div>
 
 <script>
-  const ME = "alice";
-
   let chats = [];
+  let currentUser = null;
 
   let current = null;
   let filter = "all";
@@ -303,7 +309,6 @@
     chats = await response.json();
     chats.forEach(c => c.msgs = []);
     renderChats();
-    await openChat("general");
   }
 
   async function loadMessages(chat) {
@@ -402,7 +407,7 @@
     const response = await fetch(`/api/chats/${encodeURIComponent(c.id)}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sender: ME, text })
+      body: JSON.stringify({ sender: currentUser.username, text })
     });
     if (!response.ok) {
       $("typing").textContent = "Ошибка отправки сообщения";
@@ -430,6 +435,23 @@
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
   $("back").addEventListener("click", () => $("app").classList.remove("chat-open"));
+  $("registration").addEventListener("submit", async e => {
+    e.preventDefault();
+    const status = $("registrationStatus");
+    status.textContent = "Отправка заявки…";
+    const response = await fetch("/api/registration", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: $("username").value.trim(),
+        displayName: $("displayName").value.trim()
+      })
+    });
+    const result = await response.json();
+    status.textContent = response.ok
+      ? "Заявка отправлена регистратору. Дождитесь одобрения."
+      : result.error;
+  });
 
   loadChats().catch(error => {
     $("typing").textContent = error.message;

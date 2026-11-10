@@ -8,6 +8,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 public final class ChatRepository implements AutoCloseable {
     private final Connection connection;
@@ -38,59 +39,16 @@ public final class ChatRepository implements AutoCloseable {
                         sent_at TEXT NOT NULL
                     )
                     """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL UNIQUE,
+                        display_name TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
+                        created_at TEXT NOT NULL
+                    )
+                    """);
         }
-        seed();
-    }
-
-    private void seed() throws SQLException {
-        try (PreparedStatement count = connection.prepareStatement("SELECT COUNT(*) FROM chats");
-             ResultSet result = count.executeQuery()) {
-            if (result.next() && result.getInt(1) > 0) {
-                return;
-            }
-        }
-
-        try (PreparedStatement chat = connection.prepareStatement(
-                "INSERT INTO chats(id, type, name, color, members, online) VALUES (?, ?, ?, ?, ?, ?)");
-             PreparedStatement message = connection.prepareStatement(
-                     "INSERT INTO messages(chat_id, sender, text, sent_at) VALUES (?, ?, ?, ?)")) {
-            addChat(chat, "general", "group", "Общий", "c-blue", 12, 3);
-            addChat(chat, "dev", "group", "Разработка", "c-purple", 5, 2);
-            addChat(chat, "random", "group", "Флудилка", "c-blue", 20, 5);
-            addChat(chat, "bob", "direct", "Bob", "c-green", 0, 1);
-            addChat(chat, "carol", "direct", "Carol", "c-pink", 0, 1);
-            addChat(chat, "admin", "direct", "Admin", "c-orange", 0, 0);
-
-            addMessage(message, "general", "bob", "Всем доброе утро", "2026-11-10T09:00:00Z");
-            addMessage(message, "general", "carol", "Сервер сегодня поднимали?", "2026-11-10T09:02:00Z");
-            addMessage(message, "general", "bob", "да, сертификат проверен, всё ок", "2026-11-10T09:03:00Z");
-            addMessage(message, "dev", "admin", "релиз v0.9 в ветке main", "2026-11-10T10:15:00Z");
-            addMessage(message, "dev", "carol", "тесты на SslContextFactory зелёные", "2026-11-10T10:16:00Z");
-            addMessage(message, "bob", "bob", "Глянешь PR с PBKDF2?", "2026-11-09T18:40:00Z");
-            addMessage(message, "carol", "carol", "Скинь, пожалуйста, новый сертификат для телефона", "2026-11-10T08:30:00Z");
-        }
-    }
-
-    private static void addChat(PreparedStatement statement, String id, String type, String name,
-                                String color, int members, int online) throws SQLException {
-        statement.setString(1, id);
-        statement.setString(2, type);
-        statement.setString(3, name);
-        statement.setString(4, color);
-        statement.setInt(5, members);
-        statement.setInt(6, online);
-        statement.addBatch();
-        statement.executeBatch();
-    }
-
-    private static void addMessage(PreparedStatement statement, String chatId, String sender,
-                                   String text, String sentAt) throws SQLException {
-        statement.setString(1, chatId);
-        statement.setString(2, sender);
-        statement.setString(3, text);
-        statement.setString(4, sentAt);
-        statement.addBatch();
-        statement.executeBatch();
     }
 
     public synchronized List<ChatSummary> findChats() throws SQLException {
@@ -145,6 +103,29 @@ public final class ChatRepository implements AutoCloseable {
         return new Message(sender, text, sentAt);
     }
 
+    public synchronized Registration register(String username, String displayName) throws SQLException {
+        if (username == null || !username.matches("[a-zA-Z0-9_]{3,32}")
+                || displayName == null || displayName.isBlank() || displayName.length() > 80) {
+            throw new IllegalArgumentException("Username: 3-32 латинских букв, цифр или _; имя: 1-80 символов");
+        }
+        String normalizedUsername = username.toLowerCase(Locale.ROOT);
+        String normalizedDisplayName = displayName.trim();
+        Instant createdAt = Instant.now();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO users(username, display_name, created_at) VALUES (?, ?, ?)")) {
+            statement.setString(1, normalizedUsername);
+            statement.setString(2, normalizedDisplayName);
+            statement.setString(3, createdAt.toString());
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            if (e.getMessage() != null && e.getMessage().contains("UNIQUE")) {
+                throw new IllegalArgumentException("Пользователь с таким именем уже зарегистрирован");
+            }
+            throw e;
+        }
+        return new Registration(normalizedUsername, normalizedDisplayName, "PENDING", createdAt);
+    }
+
     private boolean chatExists(String chatId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("SELECT 1 FROM chats WHERE id = ?")) {
             statement.setString(1, chatId);
@@ -161,5 +142,8 @@ public final class ChatRepository implements AutoCloseable {
 
     public record ChatSummary(String id, String type, String name, String color,
                               int members, int online, int messageCount) {
+    }
+
+    public record Registration(String username, String displayName, String status, Instant createdAt) {
     }
 }

@@ -21,6 +21,7 @@ public final class ChatServer implements AutoCloseable {
     public ChatServer(int port, Path database) throws IOException, SQLException {
         repository = new ChatRepository("jdbc:sqlite:" + database.toAbsolutePath());
         server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/api/registration", this::handleRegistration);
         server.createContext("/api/chats", this::handleChats);
         server.createContext("/", this::handlePage);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
@@ -32,6 +33,25 @@ public final class ChatServer implements AutoCloseable {
 
     public int port() {
         return server.getAddress().getPort();
+    }
+
+    private void handleRegistration(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            ChatRepository.Registration registration = repository.register(
+                    jsonValue(body, "username"), jsonValue(body, "displayName"));
+            writeJson(exchange, 201, registrationJson(registration));
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
     }
 
     private void handleChats(HttpExchange exchange) throws IOException {
@@ -96,7 +116,13 @@ public final class ChatServer implements AutoCloseable {
 
     private static String messageJson(Message message) {
         return "{\"from\":\"" + escape(message.sender()) + "\",\"text\":\"" + escape(message.text()) +
-                "\",\"t\":\"" + message.sentAt().toString() + "\",\"out\":" + "alice".equals(message.sender()) + "}";
+                "\",\"t\":\"" + message.sentAt().toString() + "\",\"out\":false}";
+    }
+
+    private static String registrationJson(ChatRepository.Registration registration) {
+        return "{\"username\":\"" + escape(registration.username()) + "\",\"displayName\":\"" +
+                escape(registration.displayName()) + "\",\"status\":\"" + registration.status() +
+                "\",\"createdAt\":\"" + registration.createdAt() + "\"}";
     }
 
     private static String jsonValue(String json, String key) {
