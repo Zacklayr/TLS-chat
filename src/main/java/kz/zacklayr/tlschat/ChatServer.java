@@ -52,10 +52,10 @@ public final class ChatServer implements AutoCloseable {
                 return;
             }
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            ChatRepository.Registration registration = repository.register(
-                    jsonValue(body, "username"), jsonValue(body, "displayName"),
-                    jsonValue(body, "password"), jsonValue(body, "profession"),
-                    jsonValue(body, "workplace"));
+            ChatRepository.Registration registration = repository.registerApplication(
+                    jsonValue(body, "fullName"), jsonValue(body, "profession"),
+                    jsonValue(body, "workplace"), jsonValue(body, "region"),
+                    jsonValue(body, "phone"));
             writeJson(exchange, 201, registrationJson(registration));
         } catch (IllegalArgumentException e) {
             writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
@@ -103,11 +103,14 @@ public final class ChatServer implements AutoCloseable {
             }
             String prefix = "/api/registrar/requests/";
             if (path.startsWith(prefix) && "POST".equals(exchange.getRequestMethod())) {
-                String username = URLDecoder.decode(path.substring(prefix.length()), StandardCharsets.UTF_8);
+                String requestId = URLDecoder.decode(path.substring(prefix.length()), StandardCharsets.UTF_8);
                 String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
                 ChatRepository.Registration registration = repository.decideRegistration(
-                        username, jsonValue(body, "status"), jsonValue(body, "profession"),
-                        jsonValue(body, "workplace"), jsonValue(body, "permissions"));
+                        requestId, jsonValue(body, "status"), jsonValue(body, "fullName"),
+                        jsonValue(body, "profession"), jsonValue(body, "workplace"),
+                        jsonValue(body, "region"), jsonValue(body, "phone"),
+                        jsonValue(body, "permissions"), jsonValue(body, "username"),
+                        jsonValue(body, "password"));
                 writeJson(exchange, 200, registrationJson(registration));
                 return;
             }
@@ -193,11 +196,14 @@ public final class ChatServer implements AutoCloseable {
     }
 
     private static String registrationJson(ChatRepository.Registration registration) {
-        return "{\"username\":\"" + escape(registration.username()) + "\",\"displayName\":\"" +
-                escape(registration.displayName()) + "\",\"profession\":\"" +
+        return "{\"id\":\"" + escape(registration.id()) + "\",\"fullName\":\"" +
+                escape(registration.fullName()) + "\",\"profession\":\"" +
                 escape(registration.profession()) + "\",\"workplace\":\"" +
-                escape(registration.workplace()) + "\",\"permissions\":\"" +
-                escape(registration.permissions()) + "\",\"status\":\"" + registration.status() +
+                escape(registration.workplace()) + "\",\"region\":\"" +
+                escape(registration.region()) + "\",\"phone\":\"" + escape(registration.phone()) +
+                "\",\"permissions\":\"" + escape(registration.permissions()) + "\",\"status\":\"" +
+                registration.status() + "\",\"accountUsername\":\"" +
+                escape(registration.accountUsername()) +
                 "\",\"createdAt\":\"" + registration.createdAt() + "\"}";
     }
 

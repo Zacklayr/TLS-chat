@@ -251,13 +251,11 @@
           <div class="big">TLS CHAT</div>
           <div>Регистрация обязательна для доступа</div>
           <form id="registration" style="display:grid;gap:6px;max-width:260px;margin:14px auto 0">
-            <input class="search" id="username" required minlength="3" maxlength="32"
-              pattern="[A-Za-z0-9_]+" placeholder="Логин">
-            <input class="search" id="displayName" required maxlength="80" placeholder="Ваше имя">
-            <input class="search" id="password" required minlength="8" maxlength="128"
-              type="password" placeholder="Пароль (минимум 8 символов)">
+            <input class="search" id="fullName" required maxlength="120" placeholder="ФИО">
             <input class="search" id="profession" required maxlength="80" placeholder="Профессия">
             <input class="search" id="workplace" required maxlength="80" placeholder="Место работы">
+            <input class="search" id="region" required maxlength="80" placeholder="Регион / город">
+            <input class="search" id="phone" required maxlength="32" placeholder="Номер телефона">
             <button class="btn primary" type="submit">Подать заявку</button>
             <small id="registrationStatus"></small>
           </form>
@@ -447,11 +445,11 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        username: $("username").value.trim(),
-        displayName: $("displayName").value.trim(),
-        password: $("password").value,
+        fullName: $("fullName").value.trim(),
         profession: $("profession").value.trim(),
-        workplace: $("workplace").value.trim()
+        workplace: $("workplace").value.trim(),
+        region: $("region").value.trim(),
+        phone: $("phone").value.trim()
       })
     });
     const result = await response.json();

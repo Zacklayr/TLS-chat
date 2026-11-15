@@ -35,8 +35,13 @@ public final class RegistrarApp {
     private List<RegistrationRequest> requests = List.of();
     private RequestTableModel tableModel;
     private JTable table;
+    private JTextField fullName;
     private JTextField profession;
     private JTextField workplace;
+    private JTextField region;
+    private JTextField phone;
+    private JTextField accountUsername;
+    private JPasswordField accountPassword;
     private JCheckBox globalWrite;
     private JCheckBox regionalWrite;
     private JCheckBox hiddenData;
@@ -97,10 +102,26 @@ public final class RegistrarApp {
         details.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
         profession = new JTextField();
         workplace = new JTextField();
+        region = new JTextField();
+        phone = new JTextField();
+        accountUsername = new JTextField();
+        accountPassword = new JPasswordField();
+        fullName = new JTextField();
+        fullName.setEditable(false);
+        details.add(new JLabel("ФИО:"));
+        details.add(fullName);
         details.add(new JLabel("Профессия:"));
         details.add(profession);
         details.add(new JLabel("Место работы:"));
         details.add(workplace);
+        details.add(new JLabel("Регион / город:"));
+        details.add(region);
+        details.add(new JLabel("Телефон:"));
+        details.add(phone);
+        details.add(new JLabel("Новый логин:"));
+        details.add(accountUsername);
+        details.add(new JLabel("Временный пароль:"));
+        details.add(accountPassword);
         globalWrite = permission("Писать в глобальный чат", details);
         regionalWrite = permission("Писать в региональные чаты", details);
         hiddenData = permission("Просматривать скрытые данные", details);
@@ -152,8 +173,13 @@ public final class RegistrarApp {
             return;
         }
         RegistrationRequest request = requests.get(table.convertRowIndexToModel(row));
+        fullName.setText(request.fullName());
         profession.setText(request.profession());
         workplace.setText(request.workplace());
+        region.setText(request.region());
+        phone.setText(request.phone());
+        accountUsername.setText("");
+        accountPassword.setText("");
         setPermissions(request.permissions());
     }
 
@@ -163,12 +189,16 @@ public final class RegistrarApp {
             return;
         }
         RegistrationRequest request = requests.get(table.convertRowIndexToModel(row));
-        String body = "{\"status\":\"" + status + "\",\"profession\":\"" + escape(profession.getText()) +
-                "\",\"workplace\":\"" + escape(workplace.getText()) + "\",\"permissions\":\"" +
+        String body = "{\"status\":\"" + status + "\",\"fullName\":\"" + escape(request.fullName()) +
+                "\",\"profession\":\"" + escape(profession.getText()) + "\",\"workplace\":\"" +
+                escape(workplace.getText()) + "\",\"region\":\"" + escape(region.getText()) +
+                "\",\"phone\":\"" + escape(phone.getText()) + "\",\"username\":\"" +
+                escape(accountUsername.getText()) + "\",\"password\":\"" +
+                escape(new String(accountPassword.getPassword())) + "\",\"permissions\":\"" +
                 escape(selectedPermissions()) + "\"}";
         try {
             request("POST", "/api/registrar/requests/" +
-                    URLEncoder.encode(request.username(), StandardCharsets.UTF_8), body);
+                    URLEncoder.encode(request.id(), StandardCharsets.UTF_8), body);
             refreshRequests();
         } catch (Exception e) {
             showError(e);
@@ -238,9 +268,10 @@ public final class RegistrarApp {
             int end = json.indexOf('}', start);
             if (end < 0) break;
             String object = json.substring(start, end + 1);
-            result.add(new RegistrationRequest(jsonValue(object, "username"),
-                    jsonValue(object, "displayName"), jsonValue(object, "profession"),
-                    jsonValue(object, "workplace"), jsonValue(object, "permissions")));
+            result.add(new RegistrationRequest(jsonValue(object, "id"),
+                    jsonValue(object, "fullName"), jsonValue(object, "profession"),
+                    jsonValue(object, "workplace"), jsonValue(object, "region"),
+                    jsonValue(object, "phone"), jsonValue(object, "permissions")));
             start = end + 1;
         }
         return result;
@@ -280,8 +311,9 @@ public final class RegistrarApp {
         JOptionPane.showMessageDialog(null, exception.getMessage(), "Ошибка", JOptionPane.ERROR_MESSAGE);
     }
 
-    private record RegistrationRequest(String username, String displayName, String profession,
-                                       String workplace, String permissions) {
+    private record RegistrationRequest(String id, String fullName, String profession,
+                                       String workplace, String region, String phone,
+                                       String permissions) {
     }
 
     private static final class RequestTableModel extends AbstractTableModel {
@@ -299,18 +331,19 @@ public final class RegistrarApp {
 
         @Override
         public int getColumnCount() {
-            return 3;
+            return 4;
         }
 
         @Override
         public String getColumnName(int column) {
-            return new String[]{"Логин", "Имя", "Профессия"}[column];
+            return new String[]{"ФИО", "Профессия", "Место работы", "Регион"}[column];
         }
 
         @Override
         public Object getValueAt(int row, int column) {
             RegistrationRequest request = requests.get(row);
-            return new String[]{request.username(), request.displayName(), request.profession()}[column];
+            return new String[]{request.fullName(), request.profession(), request.workplace(),
+                    request.region()}[column];
         }
     }
 }

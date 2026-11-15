@@ -64,6 +64,8 @@ public final class ChatRepository implements AutoCloseable {
                         created_at TEXT NOT NULL,
                         profession TEXT NOT NULL DEFAULT '',
                         workplace TEXT NOT NULL DEFAULT '',
+                        region TEXT NOT NULL DEFAULT '',
+                        phone TEXT NOT NULL DEFAULT '',
                         permissions TEXT NOT NULL DEFAULT '',
                         password_salt TEXT NOT NULL DEFAULT '',
                         password_hash TEXT NOT NULL DEFAULT ''
@@ -77,6 +79,8 @@ public final class ChatRepository implements AutoCloseable {
                         created_at TEXT NOT NULL,
                         profession TEXT NOT NULL DEFAULT '',
                         workplace TEXT NOT NULL DEFAULT '',
+                        region TEXT NOT NULL DEFAULT '',
+                        phone TEXT NOT NULL DEFAULT '',
                         permissions TEXT NOT NULL DEFAULT '',
                         password_salt TEXT NOT NULL DEFAULT '',
                         password_hash TEXT NOT NULL DEFAULT ''
@@ -84,9 +88,24 @@ public final class ChatRepository implements AutoCloseable {
                     """);
             ensureUserColumn(statement, "profession", "TEXT NOT NULL DEFAULT ''");
             ensureUserColumn(statement, "workplace", "TEXT NOT NULL DEFAULT ''");
+            ensureUserColumn(statement, "region", "TEXT NOT NULL DEFAULT ''");
+            ensureUserColumn(statement, "phone", "TEXT NOT NULL DEFAULT ''");
             ensureUserColumn(statement, "permissions", "TEXT NOT NULL DEFAULT ''");
             ensureUserColumn(statement, "password_salt", "TEXT NOT NULL DEFAULT ''");
             ensureUserColumn(statement, "password_hash", "TEXT NOT NULL DEFAULT ''");
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS registration_requests (
+                        id TEXT PRIMARY KEY,
+                        full_name TEXT NOT NULL,
+                        profession TEXT NOT NULL,
+                        workplace TEXT NOT NULL,
+                        region TEXT NOT NULL,
+                        phone TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
+                        account_username TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL
+                    )
+                    """);
         }
     }
 
@@ -194,48 +213,44 @@ public final class ChatRepository implements AutoCloseable {
         return new Message(sender, text, sentAt);
     }
 
-    public synchronized Registration register(String username, String displayName, String password,
-                                              String profession, String workplace) throws SQLException {
-        if (username == null || !username.matches("[a-zA-Z0-9_]{3,32}")
-                || displayName == null || displayName.isBlank() || displayName.length() > 80
-                || password == null || password.length() < 8 || password.length() > 128
+    public synchronized Registration registerApplication(String fullName, String profession,
+                                                         String workplace, String region, String phone)
+            throws SQLException {
+        if (fullName == null || fullName.isBlank() || fullName.length() > 120
                 || profession == null || profession.isBlank() || profession.length() > 80
-                || workplace == null || workplace.isBlank() || workplace.length() > 80) {
-            throw new IllegalArgumentException("Заполните логин, имя, пароль (8-128 символов), профессию и место работы");
+                || workplace == null || workplace.isBlank() || workplace.length() > 80
+                || region == null || region.isBlank() || region.length() > 80
+                || phone == null || phone.isBlank() || phone.length() > 32) {
+            throw new IllegalArgumentException("Заполните ФИО, профессию, место работы, регион и номер телефона");
         }
-        String normalizedUsername = username.toLowerCase(Locale.ROOT);
-        String normalizedDisplayName = displayName.trim();
+        String requestId = java.util.UUID.randomUUID().toString();
+        String normalizedFullName = fullName.trim();
         String normalizedProfession = profession.trim();
         String normalizedWorkplace = workplace.trim();
-        PasswordHasher.PasswordHash passwordHash = PasswordHasher.hash(password.toCharArray());
+        String normalizedRegion = region.trim();
+        String normalizedPhone = phone.trim();
         Instant createdAt = Instant.now();
         try (PreparedStatement statement = connection.prepareStatement(
-                "INSERT INTO users(username, display_name, profession, workplace, password_salt, password_hash, created_at) " +
+                "INSERT INTO registration_requests(id, full_name, profession, workplace, region, phone, created_at) " +
                         "VALUES (?, ?, ?, ?, ?, ?, ?)")) {
-            statement.setString(1, normalizedUsername);
-            statement.setString(2, normalizedDisplayName);
+            statement.setString(1, requestId);
+            statement.setString(2, normalizedFullName);
             statement.setString(3, normalizedProfession);
             statement.setString(4, normalizedWorkplace);
-            statement.setString(5, passwordHash.salt());
-            statement.setString(6, passwordHash.hash());
+            statement.setString(5, normalizedRegion);
+            statement.setString(6, normalizedPhone);
             statement.setString(7, createdAt.toString());
             statement.executeUpdate();
-        } catch (SQLException e) {
-            if ("23505".equals(e.getSQLState())
-                    || (e.getMessage() != null && e.getMessage().contains("UNIQUE"))) {
-                throw new IllegalArgumentException("Пользователь с таким именем уже зарегистрирован");
-            }
-            throw e;
         }
-        return new Registration(normalizedUsername, normalizedDisplayName, normalizedProfession,
-                normalizedWorkplace, "", "PENDING", createdAt);
+        return new Registration(requestId, normalizedFullName, normalizedProfession,
+                normalizedWorkplace, normalizedRegion, normalizedPhone, "", "PENDING", "", createdAt);
     }
 
     public synchronized List<Registration> pendingRegistrations() throws SQLException {
         List<Registration> registrations = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT username, display_name, profession, workplace, permissions, status, created_at " +
-                        "FROM users WHERE status = 'PENDING' ORDER BY created_at");
+                "SELECT id, full_name, profession, workplace, region, phone, status, account_username, created_at " +
+                        "FROM registration_requests WHERE status = 'PENDING' ORDER BY created_at");
              ResultSet result = statement.executeQuery()) {
             while (result.next()) {
                 registrations.add(registrationFrom(result));
@@ -244,34 +259,76 @@ public final class ChatRepository implements AutoCloseable {
         return registrations;
     }
 
-    public synchronized Registration decideRegistration(String username, String status, String profession,
-                                                         String workplace, String permissions) throws SQLException {
+    public synchronized Registration decideRegistration(String requestId, String status, String fullName,
+                                                         String profession, String workplace, String region,
+                                                         String phone, String permissions, String username,
+                                                         String password) throws SQLException {
         if (!"APPROVED".equals(status) && !"REJECTED".equals(status)) {
             throw new IllegalArgumentException("Status must be APPROVED or REJECTED");
         }
-        if (username == null || username.isBlank()) {
-            throw new IllegalArgumentException("Username is required");
-        }
-        if ("APPROVED".equals(status)
-                && (profession == null || profession.isBlank() || workplace == null || workplace.isBlank())) {
-            throw new IllegalArgumentException("Профессия и место работы обязательны для одобрения");
-        }
         String normalizedPermissions = normalizePermissions(permissions);
-        try (PreparedStatement statement = connection.prepareStatement(
-                "UPDATE users SET status = ?, profession = ?, workplace = ?, permissions = ? WHERE username = ?")) {
-            statement.setString(1, status);
-            statement.setString(2, profession == null ? "" : profession.trim());
-            statement.setString(3, workplace == null ? "" : workplace.trim());
-            statement.setString(4, normalizedPermissions);
-            statement.setString(5, username.toLowerCase(Locale.ROOT));
-            if (statement.executeUpdate() != 1) {
-                throw new IllegalArgumentException("Заявка не найдена");
+        Registration request = findRequest(requestId);
+        if ("APPROVED".equals(status)) {
+            if (username == null || !username.matches("[a-zA-Z0-9_]{3,32}")
+                    || password == null || password.length() < 8 || password.length() > 128) {
+                throw new IllegalArgumentException("Регистратор должен указать логин и пароль (8-128 символов)");
+            }
+            if (fullName == null || fullName.isBlank() || profession == null || profession.isBlank()
+                    || workplace == null || workplace.isBlank() || region == null || region.isBlank()
+                    || phone == null || phone.isBlank()) {
+                throw new IllegalArgumentException("Анкета сотрудника заполнена не полностью");
+            }
+            PasswordHasher.PasswordHash passwordHash = PasswordHasher.hash(password.toCharArray());
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "INSERT INTO users(username, display_name, profession, workplace, region, phone, permissions, " +
+                            "password_salt, password_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                statement.setString(1, username.toLowerCase(Locale.ROOT));
+                statement.setString(2, fullName.trim());
+                statement.setString(3, profession.trim());
+                statement.setString(4, workplace.trim());
+                statement.setString(5, region.trim());
+                statement.setString(6, phone.trim());
+                statement.setString(7, normalizedPermissions);
+                statement.setString(8, passwordHash.salt());
+                statement.setString(9, passwordHash.hash());
+                statement.setString(10, "APPROVED");
+                statement.setString(11, Instant.now().toString());
+                statement.executeUpdate();
+            } catch (SQLException e) {
+                if ("23505".equals(e.getSQLState())
+                        || (e.getMessage() != null && e.getMessage().contains("UNIQUE"))) {
+                    throw new IllegalArgumentException("Пользователь с таким логином уже существует");
+                }
+                throw e;
             }
         }
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT username, display_name, profession, workplace, permissions, status, created_at " +
-                        "FROM users WHERE username = ?")) {
-            statement.setString(1, username.toLowerCase(Locale.ROOT));
+                "UPDATE registration_requests SET status = ?, account_username = ? WHERE id = ?")) {
+            statement.setString(1, status);
+            statement.setString(2, "APPROVED".equals(status) ? username.toLowerCase(Locale.ROOT) : "");
+            statement.setString(3, requestId);
+            statement.executeUpdate();
+        }
+        return new Registration(request.id(), fullName == null ? request.fullName() : fullName.trim(),
+                profession == null ? request.profession() : profession.trim(),
+                workplace == null ? request.workplace() : workplace.trim(),
+                region == null ? request.region() : region.trim(),
+                phone == null ? request.phone() : phone.trim(), normalizedPermissions, status,
+                "APPROVED".equals(status) ? username.toLowerCase(Locale.ROOT) : "", request.createdAt());
+    }
+
+    private Registration registrationFrom(ResultSet result) throws SQLException {
+        return new Registration(result.getString("id"), result.getString("full_name"),
+                result.getString("profession"), result.getString("workplace"), result.getString("region"),
+                result.getString("phone"), "", result.getString("status"),
+                result.getString("account_username"), Instant.parse(result.getString("created_at")));
+    }
+
+    private Registration findRequest(String requestId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT id, full_name, profession, workplace, region, phone, status, account_username, created_at " +
+                        "FROM registration_requests WHERE id = ?")) {
+            statement.setString(1, requestId);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
                     throw new IllegalArgumentException("Заявка не найдена");
@@ -279,13 +336,6 @@ public final class ChatRepository implements AutoCloseable {
                 return registrationFrom(result);
             }
         }
-    }
-
-    private Registration registrationFrom(ResultSet result) throws SQLException {
-        return new Registration(result.getString("username"), result.getString("display_name"),
-                result.getString("profession"), result.getString("workplace"),
-                result.getString("permissions"), result.getString("status"),
-                Instant.parse(result.getString("created_at")));
     }
 
     static String normalizePermissions(String permissions) {
@@ -325,7 +375,8 @@ public final class ChatRepository implements AutoCloseable {
                               int members, int online, int messageCount) {
     }
 
-    public record Registration(String username, String displayName, String profession, String workplace,
-                               String permissions, String status, Instant createdAt) {
+    public record Registration(String id, String fullName, String profession, String workplace,
+                               String region, String phone, String permissions, String status,
+                               String accountUsername, Instant createdAt) {
     }
 }
