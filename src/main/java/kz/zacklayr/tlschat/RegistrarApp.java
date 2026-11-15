@@ -226,13 +226,16 @@ public final class RegistrarApp {
                 : HttpRequest.BodyPublishers.ofString(body)).build();
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException(jsonValue(response.body(), "error"));
+            throw new IllegalStateException(errorMessage(response));
         }
         return response.body();
     }
 
     private static String trimServerUrl(String value) {
         String result = value.trim();
+        if (!result.contains("://")) {
+            result = "https://" + result;
+        }
         while (result.endsWith("/")) {
             result = result.substring(0, result.length() - 1);
         }
@@ -240,6 +243,21 @@ public final class RegistrarApp {
             throw new IllegalArgumentException("Адрес должен начинаться с http:// или https://");
         }
         return result;
+    }
+
+    private static String errorMessage(HttpResponse<String> response) {
+        String body = response.body() == null ? "" : response.body().trim();
+        if (body.startsWith("{")) {
+            try {
+                return "HTTP " + response.statusCode() + ": " + jsonValue(body, "error");
+            } catch (IllegalStateException ignored) {
+                // Fall through for non-API responses such as a proxy error page.
+            }
+        }
+        if (body.contains("No such app")) {
+            return "Heroku-приложение не найдено. Проверьте актуальный адрес сервера.";
+        }
+        return "Сервер вернул HTTP " + response.statusCode() + ". Проверьте адрес сервера.";
     }
 
     private String selectedPermissions() {
