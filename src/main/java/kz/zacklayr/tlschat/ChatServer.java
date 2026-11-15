@@ -24,6 +24,7 @@ public final class ChatServer implements AutoCloseable {
     private final HttpServer server;
     private final ChatRepository repository;
     private final Set<String> registrarTokens = ConcurrentHashMap.newKeySet();
+    private final Set<String> adminTokens = ConcurrentHashMap.newKeySet();
     private final Map<String, ChatRepository.UserAccount> userTokens = new ConcurrentHashMap<>();
 
     public ChatServer(int port, Path database) throws IOException, SQLException {
@@ -35,15 +36,18 @@ public final class ChatServer implements AutoCloseable {
         server.createContext("/api/registration", this::handleRegistration);
         server.createContext("/api/login", this::handleLogin);
         server.createContext("/api/registrar", this::handleRegistrar);
+        server.createContext("/api/admin", this::handleAdmin);
         server.createContext("/api/chats", this::handleChats);
         server.createContext("/", this::handlePage);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
 
-    private boolean isUserAuthenticated(HttpExchange exchange) {
+    private ChatRepository.UserAccount authenticatedUser(HttpExchange exchange) {
         String header = exchange.getRequestHeaders().getFirst("Authorization");
-        return header != null && header.startsWith("Bearer ")
-                && userTokens.containsKey(header.substring("Bearer ".length()).trim());
+        if (header == null || !header.startsWith("Bearer ")) {
+            return null;
+        }
+        return userTokens.get(header.substring("Bearer ".length()).trim());
     }
 
     private void handleLogin(HttpExchange exchange) throws IOException {
@@ -147,7 +151,65 @@ public final class ChatServer implements AutoCloseable {
                         jsonValue(body, "region"), jsonValue(body, "phone"),
                         jsonValue(body, "permissions"), jsonValue(body, "username"),
                         jsonValue(body, "password"));
+                if ("APPROVED".equals(registration.status())) {
+                    repository.assignChatsForUser(registration.accountUsername());
+                }
                 writeJson(exchange, 200, registrationJson(registration));
+                return;
+            }
+
+            writeJson(exchange, 404, "{\"error\":\"Not found\"}");
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void handleAdmin(HttpExchange exchange) throws IOException {
+        try {
+            String path = exchange.getRequestURI().getPath();
+            if ("/api/admin/login".equals(path) && "POST".equals(exchange.getRequestMethod())) {
+                String configuredUsername = System.getenv("ADMIN_USERNAME");
+                String configuredPassword = System.getenv("ADMIN_PASSWORD");
+                if (configuredUsername == null || configuredPassword == null
+                        || configuredUsername.isBlank() || configuredPassword.isBlank()) {
+                    writeJson(exchange, 503, "{\"error\":\"Admin access is not configured\"}");
+                    return;
+                }
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                boolean validUsername = MessageDigest.isEqual(
+                        configuredUsername.getBytes(StandardCharsets.UTF_8),
+                        jsonValue(body, "username").getBytes(StandardCharsets.UTF_8));
+                boolean validPassword = MessageDigest.isEqual(
+                        configuredPassword.getBytes(StandardCharsets.UTF_8),
+                        jsonValue(body, "password").getBytes(StandardCharsets.UTF_8));
+                if (!validUsername || !validPassword) {
+                    writeJson(exchange, 401, "{\"error\":\"Invalid admin credentials\"}");
+                    return;
+                }
+                String token = UUID.randomUUID().toString();
+                adminTokens.add(token);
+                writeJson(exchange, 200, "{\"token\":\"" + token + "\"}");
+                return;
+            }
+            if (!isAdminAuthenticated(exchange)) {
+                writeJson(exchange, 401, "{\"error\":\"Admin authentication required\"}");
+                return;
+            }
+            if ("/api/admin/chats".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, adminChatsJson(repository.adminChats()));
+                return;
+            }
+            if ("/api/admin/chats".equals(path) && "POST".equals(exchange.getRequestMethod())) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                ChatRepository.ChatDefinition chat = repository.createChat(
+                        jsonValue(body, "id"), jsonValue(body, "type"), jsonValue(body, "name"),
+                        jsonValue(body, "color"), jsonValue(body, "professionRule"),
+                        jsonValue(body, "workplaceRule"), jsonValue(body, "writePermissions"));
+                writeJson(exchange, 201, chatJson(chat));
                 return;
             }
             writeJson(exchange, 404, "{\"error\":\"Not found\"}");
@@ -160,6 +222,12 @@ public final class ChatServer implements AutoCloseable {
         }
     }
 
+    private boolean isAdminAuthenticated(HttpExchange exchange) {
+        String header = exchange.getRequestHeaders().getFirst("Authorization");
+        return header != null && header.startsWith("Bearer ")
+                && adminTokens.contains(header.substring("Bearer ".length()).trim());
+    }
+
     private boolean isRegistrarAuthenticated(HttpExchange exchange) {
         String header = exchange.getRequestHeaders().getFirst("Authorization");
         return header != null && header.startsWith("Bearer ")
@@ -167,7 +235,8 @@ public final class ChatServer implements AutoCloseable {
     }
 
     private void handleChats(HttpExchange exchange) throws IOException {
-        if (!isUserAuthenticated(exchange)) {
+        ChatRepository.UserAccount account = authenticatedUser(exchange);
+        if (account == null) {
             writeJson(exchange, 401, "{\"error\":\"Login required\"}");
             exchange.close();
             return;
@@ -176,14 +245,13 @@ public final class ChatServer implements AutoCloseable {
             String path = exchange.getRequestURI().getPath();
             String[] parts = path.split("/");
             if ("GET".equals(exchange.getRequestMethod()) && "/api/chats".equals(path)) {
-                writeJson(exchange, 200, chatsJson(repository.findChats()));
+                writeJson(exchange, 200, chatsJson(repository.findChatsForUser(account)));
             } else if ("GET".equals(exchange.getRequestMethod()) && parts.length == 4 && !parts[3].isBlank()) {
-                writeJson(exchange, 200, messagesJson(repository.findMessages(parts[3])));
+                writeJson(exchange, 200, messagesJson(repository.findMessages(parts[3], account.username())));
             } else if ("POST".equals(exchange.getRequestMethod()) && parts.length == 5 && "messages".equals(parts[4])) {
                 String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-                String sender = jsonValue(body, "sender");
                 String text = jsonValue(body, "text");
-                Message message = repository.addMessage(parts[3], sender, text);
+                Message message = repository.addMessage(parts[3], account.username(), account.permissions(), text);
                 writeJson(exchange, 201, messageJson(message));
             } else {
                 writeJson(exchange, 404, "{\"error\":\"Not found\"}");
@@ -250,6 +318,19 @@ public final class ChatServer implements AutoCloseable {
 
     private static String registrationsJson(List<ChatRepository.Registration> registrations) {
         return "[" + registrations.stream().map(ChatServer::registrationJson)
+                .collect(java.util.stream.Collectors.joining(",")) + "]";
+    }
+
+    private static String chatJson(ChatRepository.ChatDefinition chat) {
+        return "{\"id\":\"" + escape(chat.id()) + "\",\"type\":\"" + escape(chat.type()) +
+                "\",\"name\":\"" + escape(chat.name()) + "\",\"color\":\"" + escape(chat.color()) +
+                "\",\"professionRule\":\"" + escape(chat.professionRule()) + "\",\"workplaceRule\":\"" +
+                escape(chat.workplaceRule()) + "\",\"writePermissions\":\"" +
+                escape(chat.writePermissions()) + "\"}";
+    }
+
+    private static String adminChatsJson(List<ChatRepository.ChatDefinition> chats) {
+        return "[" + chats.stream().map(ChatServer::chatJson)
                 .collect(java.util.stream.Collectors.joining(",")) + "]";
     }
 

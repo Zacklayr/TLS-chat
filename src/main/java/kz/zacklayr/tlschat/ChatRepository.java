@@ -10,6 +10,7 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -35,7 +36,10 @@ public final class ChatRepository implements AutoCloseable {
                         name TEXT NOT NULL,
                         color TEXT NOT NULL,
                         members INTEGER NOT NULL DEFAULT 0,
-                        online INTEGER NOT NULL DEFAULT 0
+                        online INTEGER NOT NULL DEFAULT 0,
+                        profession_rule TEXT NOT NULL DEFAULT '',
+                        workplace_rule TEXT NOT NULL DEFAULT '',
+                        write_permissions TEXT NOT NULL DEFAULT ''
                     )
                     """);
             statement.executeUpdate(postgres ? """
@@ -93,6 +97,9 @@ public final class ChatRepository implements AutoCloseable {
             ensureUserColumn(statement, "permissions", "TEXT NOT NULL DEFAULT ''");
             ensureUserColumn(statement, "password_salt", "TEXT NOT NULL DEFAULT ''");
             ensureUserColumn(statement, "password_hash", "TEXT NOT NULL DEFAULT ''");
+            ensureChatColumn(statement, "profession_rule", "TEXT NOT NULL DEFAULT ''");
+            ensureChatColumn(statement, "workplace_rule", "TEXT NOT NULL DEFAULT ''");
+            ensureChatColumn(statement, "write_permissions", "TEXT NOT NULL DEFAULT ''");
             statement.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS registration_requests (
                         id TEXT PRIMARY KEY,
@@ -104,6 +111,13 @@ public final class ChatRepository implements AutoCloseable {
                         status TEXT NOT NULL DEFAULT 'PENDING',
                         account_username TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL
+                    )
+                    """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS chat_members (
+                        chat_id TEXT NOT NULL,
+                        username TEXT NOT NULL,
+                        PRIMARY KEY (chat_id, username)
                     )
                     """);
         }
@@ -120,6 +134,17 @@ public final class ChatRepository implements AutoCloseable {
             }
         }
         statement.executeUpdate("ALTER TABLE users ADD COLUMN " + name + " " + definition);
+    }
+
+    private void ensureChatColumn(Statement statement, String name, String definition) throws SQLException {
+        try (ResultSet columns = statement.executeQuery("SELECT * FROM chats WHERE 1 = 0")) {
+            for (int i = 1; i <= columns.getMetaData().getColumnCount(); i++) {
+                if (name.equalsIgnoreCase(columns.getMetaData().getColumnName(i))) {
+                    return;
+                }
+            }
+        }
+        statement.executeUpdate("ALTER TABLE chats ADD COLUMN " + name + " " + definition);
     }
 
     static String normalizeJdbcUrl(String jdbcUrl) {
@@ -176,9 +201,127 @@ public final class ChatRepository implements AutoCloseable {
         return chats;
     }
 
-    public synchronized List<Message> findMessages(String chatId) throws SQLException {
-        if (!chatExists(chatId)) {
-            throw new IllegalArgumentException("Unknown chat: " + chatId);
+    public synchronized List<ChatSummary> findChatsForUser(UserAccount user) throws SQLException {
+        List<ChatSummary> chats = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT c.*, (SELECT COUNT(*) FROM chat_members cm2 WHERE cm2.chat_id = c.id) AS member_count, " +
+                        "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count " +
+                        "FROM chats c JOIN chat_members cm ON cm.chat_id = c.id AND cm.username = ? " +
+                        "ORDER BY c.type, c.name")) {
+            statement.setString(1, user.username());
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    chats.add(new ChatSummary(result.getString("id"), result.getString("type"),
+                            result.getString("name"), result.getString("color"), result.getInt("member_count"),
+                            result.getInt("online"), result.getInt("message_count")));
+                }
+            }
+        }
+        return chats;
+    }
+
+    public synchronized ChatDefinition createChat(String id, String type, String name, String color,
+                                                   String professionRule, String workplaceRule,
+                                                   String writePermissions) throws SQLException {
+        if (id == null || !id.matches("[a-zA-Z0-9_-]{2,64}") || name == null || name.isBlank()
+                || type == null || type.isBlank() || color == null || color.isBlank()) {
+            throw new IllegalArgumentException("Укажите id, тип, название и цвет чата");
+        }
+        String normalizedPermissions = normalizePermissions(writePermissions);
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, write_permissions) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+            statement.setString(1, id);
+            statement.setString(2, type.trim());
+            statement.setString(3, name.trim());
+            statement.setString(4, color.trim());
+            statement.setString(5, professionRule == null ? "" : professionRule.trim());
+            statement.setString(6, workplaceRule == null ? "" : workplaceRule.trim());
+            statement.setString(7, normalizedPermissions);
+            statement.executeUpdate();
+        }
+        assignUsersToChat(id);
+        return new ChatDefinition(id, type.trim(), name.trim(), color.trim(),
+                professionRule == null ? "" : professionRule.trim(),
+                workplaceRule == null ? "" : workplaceRule.trim(), normalizedPermissions);
+    }
+
+    private void assignUsersToChat(String chatId) throws SQLException {
+        String sql = "SELECT username FROM users WHERE status = 'APPROVED' AND username NOT IN " +
+                "(SELECT username FROM chat_members WHERE chat_id = ?)";
+        try (PreparedStatement users = connection.prepareStatement(sql)) {
+            users.setString(1, chatId);
+            try (ResultSet result = users.executeQuery()) {
+                while (result.next()) {
+                    assignChatsForUser(result.getString("username"));
+                }
+            }
+        }
+    }
+
+    public synchronized void assignChatsForUser(String username) throws SQLException {
+        try (PreparedStatement user = connection.prepareStatement(
+                "SELECT profession, workplace FROM users WHERE username = ?")) {
+            user.setString(1, username);
+            try (ResultSet userResult = user.executeQuery()) {
+                if (!userResult.next()) {
+                    return;
+                }
+                try (PreparedStatement chats = connection.prepareStatement(
+                        "SELECT id FROM chats WHERE (profession_rule = '' OR profession_rule = ?) " +
+                                "AND (workplace_rule = '' OR workplace_rule = ?)")) {
+                    chats.setString(1, userResult.getString("profession"));
+                    chats.setString(2, userResult.getString("workplace"));
+                    try (ResultSet chatResult = chats.executeQuery()) {
+                        while (chatResult.next()) {
+                            insertMembership(chatResult.getString("id"), username);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void insertMembership(String chatId, String username) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                postgres ? "INSERT INTO chat_members(chat_id, username) VALUES (?, ?) ON CONFLICT DO NOTHING"
+                        : "INSERT OR IGNORE INTO chat_members(chat_id, username) VALUES (?, ?)")) {
+            statement.setString(1, chatId);
+            statement.setString(2, username);
+            statement.executeUpdate();
+        }
+    }
+
+    public synchronized List<ChatDefinition> adminChats() throws SQLException {
+        List<ChatDefinition> chats = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT id, type, name, color, profession_rule, workplace_rule, write_permissions " +
+                        "FROM chats ORDER BY name");
+             ResultSet result = statement.executeQuery()) {
+            while (result.next()) {
+                chats.add(new ChatDefinition(result.getString("id"), result.getString("type"),
+                        result.getString("name"), result.getString("color"),
+                        result.getString("profession_rule"), result.getString("workplace_rule"),
+                        result.getString("write_permissions")));
+            }
+        }
+        return chats;
+    }
+
+    private boolean isMember(String chatId, String username) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM chat_members WHERE chat_id = ? AND username = ?")) {
+            statement.setString(1, chatId);
+            statement.setString(2, username);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
+        }
+    }
+
+    public synchronized List<Message> findMessages(String chatId, String username) throws SQLException {
+        if (!chatExists(chatId) || !isMember(chatId, username)) {
+            throw new IllegalArgumentException("Chat is not available");
         }
         List<Message> messages = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
@@ -194,12 +337,22 @@ public final class ChatRepository implements AutoCloseable {
         return messages;
     }
 
-    public synchronized Message addMessage(String chatId, String sender, String text) throws SQLException {
-        if (!chatExists(chatId)) {
-            throw new IllegalArgumentException("Unknown chat: " + chatId);
+    public synchronized Message addMessage(String chatId, String sender, String permissions, String text)
+            throws SQLException {
+        if (!chatExists(chatId) || !isMember(chatId, sender)) {
+            throw new IllegalArgumentException("Chat is not available");
         }
         if (sender == null || sender.isBlank() || text == null || text.isBlank() || text.length() > 4000) {
             throw new IllegalArgumentException("Sender and message text are required; text must be 1..4000 characters");
+        }
+        try (PreparedStatement access = connection.prepareStatement(
+                "SELECT write_permissions FROM chats WHERE id = ?")) {
+            access.setString(1, chatId);
+            try (ResultSet result = access.executeQuery()) {
+                if (result.next() && !canWrite(result.getString("write_permissions"), permissions)) {
+                    throw new IllegalArgumentException("У вас нет права писать в этот чат");
+                }
+            }
         }
         Instant sentAt = Instant.now();
         try (PreparedStatement statement = connection.prepareStatement(
@@ -388,6 +541,15 @@ public final class ChatRepository implements AutoCloseable {
         }
     }
 
+    private static boolean canWrite(String required, String actual) {
+        if (required == null || required.isBlank()) {
+            return true;
+        }
+        Set<String> actualPermissions = new HashSet<>(
+                Arrays.asList((actual == null ? "" : actual).split(",")));
+        return Arrays.stream(required.split(",")).anyMatch(actualPermissions::contains);
+    }
+
     @Override
     public void close() throws SQLException {
         connection.close();
@@ -395,6 +557,11 @@ public final class ChatRepository implements AutoCloseable {
 
     public record ChatSummary(String id, String type, String name, String color,
                               int members, int online, int messageCount) {
+    }
+
+    public record ChatDefinition(String id, String type, String name, String color,
+                                 String professionRule, String workplaceRule,
+                                 String writePermissions) {
     }
 
     public record Registration(String id, String fullName, String profession, String workplace,
