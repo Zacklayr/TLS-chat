@@ -6,6 +6,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -70,15 +73,41 @@ public final class ChatRepository implements AutoCloseable {
         }
     }
 
-    private static String normalizeJdbcUrl(String jdbcUrl) {
+    static String normalizeJdbcUrl(String jdbcUrl) {
         if (jdbcUrl.startsWith("jdbc:")) {
             return jdbcUrl;
         }
-        if (jdbcUrl.startsWith("postgres://")) {
-            return "jdbc:postgresql://" + jdbcUrl.substring("postgres://".length());
-        }
-        if (jdbcUrl.startsWith("postgresql://")) {
-            return "jdbc:" + jdbcUrl;
+        if (jdbcUrl.startsWith("postgres://") || jdbcUrl.startsWith("postgresql://")) {
+            URI database = URI.create(jdbcUrl);
+            if (database.getHost() == null || database.getPath() == null) {
+                throw new IllegalArgumentException("Invalid PostgreSQL database URL");
+            }
+            StringBuilder normalized = new StringBuilder("jdbc:postgresql://")
+                    .append(database.getHost());
+            if (database.getPort() >= 0) {
+                normalized.append(':').append(database.getPort());
+            }
+            normalized.append(database.getRawPath());
+
+            String rawQuery = database.getRawQuery();
+            String userInfo = database.getUserInfo();
+            if (userInfo != null) {
+                int separator = userInfo.indexOf(':');
+                if (separator <= 0 || separator == userInfo.length() - 1) {
+                    throw new IllegalArgumentException("Invalid PostgreSQL database credentials");
+                }
+                String user = userInfo.substring(0, separator);
+                String password = userInfo.substring(separator + 1);
+                normalized.append('?')
+                        .append("user=").append(URLEncoder.encode(user, StandardCharsets.UTF_8))
+                        .append("&password=").append(URLEncoder.encode(password, StandardCharsets.UTF_8));
+                if (rawQuery != null && !rawQuery.isBlank()) {
+                    normalized.append('&').append(rawQuery);
+                }
+            } else if (rawQuery != null && !rawQuery.isBlank()) {
+                normalized.append('?').append(rawQuery);
+            }
+            return normalized.toString();
         }
         return jdbcUrl;
     }
