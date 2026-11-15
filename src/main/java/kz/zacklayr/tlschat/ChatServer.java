@@ -40,6 +40,12 @@ public final class ChatServer implements AutoCloseable {
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
 
+    private boolean isUserAuthenticated(HttpExchange exchange) {
+        String header = exchange.getRequestHeaders().getFirst("Authorization");
+        return header != null && header.startsWith("Bearer ")
+                && userTokens.containsKey(header.substring("Bearer ".length()).trim());
+    }
+
     private void handleLogin(HttpExchange exchange) throws IOException {
         try {
             if (!"POST".equals(exchange.getRequestMethod())) {
@@ -161,6 +167,11 @@ public final class ChatServer implements AutoCloseable {
     }
 
     private void handleChats(HttpExchange exchange) throws IOException {
+        if (!isUserAuthenticated(exchange)) {
+            writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+            exchange.close();
+            return;
+        }
         try {
             String path = exchange.getRequestURI().getPath();
             String[] parts = path.split("/");

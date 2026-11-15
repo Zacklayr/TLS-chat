@@ -493,10 +493,6 @@
     await loadChats();
   });
 
-  loadChats().catch(error => {
-    $("typing").textContent = error.message;
-    console.error(error);
-  });
 </script>
 </body>
 </html> 
