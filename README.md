@@ -88,6 +88,26 @@ powershell -ExecutionPolicy Bypass -File .\start-server.ps1
 
 Для Heroku проект содержит `Procfile` и `system.properties`. Сервер использует порт из переменной `PORT`, которую Heroku задаёт автоматически. Если Heroku задаёт `DATABASE_URL`, приложение использует PostgreSQL; без неё локально используется SQLite. Поэтому перед рабочим запуском нужно добавить Heroku Postgres и не хранить production-данные в SQLite.
 
+### Панель регистратора
+
+Заявка на регистрацию содержит логин, имя, пароль, профессию и место работы. До одобрения регистратора пользователь имеет статус `PENDING` и не должен считаться сотрудником. Пароль хранится как PBKDF2-хэш с отдельной солью. Профессия и место работы назначаются как видимые атрибуты, а разрешения `global_write`, `regional_write`, `hidden_data`, `manage_users` и `manage_chats` хранятся отдельно как скрытые права.
+
+Панель регистратора — отдельное Java Swing-приложение без веб-версии. Серверный доступ регистратора включается только при наличии Config Vars:
+
+```text
+REGISTRAR_USERNAME=registrar
+REGISTRAR_PASSWORD=<длинный пароль>
+```
+
+Для локального запуска:
+
+```powershell
+mvn package -DskipTests
+java -cp "target\classes;target\dependency\*" kz.zacklayr.tlschat.RegistrarApp http://localhost:8080
+```
+
+Для Heroku передайте приложению URL вида `https://<app-name>.herokuapp.com`. Первого регистратора не нужно добавлять в базу вручную: задайте обе Config Vars в Heroku Settings → Config Vars. Секреты не добавляйте в Git и не отправляйте в чат.
+
 ### Негізгі бағдарламалау паттерні: Observer
 
 Хабарламаларды клиенттерге тарату үшін жобаның негізгі паттерні ретінде **Observer** таңдалды. `MessageBroadcaster` — хабарлама жариялаушысы (Subject), ал `MessageListener` — бақылаушы (Observer). Жаңа клиент қосылғанда ол listener ретінде тіркеледі, ал хабарлама келгенде `broadcast` барлық тіркелген клиенттерге шақырылады. Сондықтан хабар тарату логикасы нақты клиенттерге тәуелді болмайды.

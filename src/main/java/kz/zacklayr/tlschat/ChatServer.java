@@ -7,16 +7,22 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.Set;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
 public final class ChatServer implements AutoCloseable {
     private final HttpServer server;
     private final ChatRepository repository;
+    private final Set<String> registrarTokens = ConcurrentHashMap.newKeySet();
 
     public ChatServer(int port, Path database) throws IOException, SQLException {
         String databaseUrl = System.getenv("DATABASE_URL");
@@ -25,6 +31,7 @@ public final class ChatServer implements AutoCloseable {
                 : databaseUrl);
         server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/api/registration", this::handleRegistration);
+        server.createContext("/api/registrar", this::handleRegistrar);
         server.createContext("/api/chats", this::handleChats);
         server.createContext("/", this::handlePage);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
@@ -46,7 +53,9 @@ public final class ChatServer implements AutoCloseable {
             }
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             ChatRepository.Registration registration = repository.register(
-                    jsonValue(body, "username"), jsonValue(body, "displayName"));
+                    jsonValue(body, "username"), jsonValue(body, "displayName"),
+                    jsonValue(body, "password"), jsonValue(body, "profession"),
+                    jsonValue(body, "workplace"));
             writeJson(exchange, 201, registrationJson(registration));
         } catch (IllegalArgumentException e) {
             writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
@@ -55,6 +64,67 @@ public final class ChatServer implements AutoCloseable {
         } finally {
             exchange.close();
         }
+    }
+
+    private void handleRegistrar(HttpExchange exchange) throws IOException {
+        try {
+            String path = exchange.getRequestURI().getPath();
+            if ("/api/registrar/login".equals(path) && "POST".equals(exchange.getRequestMethod())) {
+                String configuredUsername = System.getenv("REGISTRAR_USERNAME");
+                String configuredPassword = System.getenv("REGISTRAR_PASSWORD");
+                if (configuredUsername == null || configuredPassword == null
+                        || configuredUsername.isBlank() || configuredPassword.isBlank()) {
+                    writeJson(exchange, 503, "{\"error\":\"Registrar access is not configured\"}");
+                    return;
+                }
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                boolean validUsername = MessageDigest.isEqual(
+                        configuredUsername.getBytes(StandardCharsets.UTF_8),
+                        jsonValue(body, "username").getBytes(StandardCharsets.UTF_8));
+                boolean validPassword = MessageDigest.isEqual(
+                        configuredPassword.getBytes(StandardCharsets.UTF_8),
+                        jsonValue(body, "password").getBytes(StandardCharsets.UTF_8));
+                if (!validUsername || !validPassword) {
+                    writeJson(exchange, 401, "{\"error\":\"Invalid registrar credentials\"}");
+                    return;
+                }
+                String token = UUID.randomUUID().toString();
+                registrarTokens.add(token);
+                writeJson(exchange, 200, "{\"token\":\"" + token + "\"}");
+                return;
+            }
+            if (!isRegistrarAuthenticated(exchange)) {
+                writeJson(exchange, 401, "{\"error\":\"Registrar authentication required\"}");
+                return;
+            }
+            if ("/api/registrar/requests".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, registrationsJson(repository.pendingRegistrations()));
+                return;
+            }
+            String prefix = "/api/registrar/requests/";
+            if (path.startsWith(prefix) && "POST".equals(exchange.getRequestMethod())) {
+                String username = URLDecoder.decode(path.substring(prefix.length()), StandardCharsets.UTF_8);
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                ChatRepository.Registration registration = repository.decideRegistration(
+                        username, jsonValue(body, "status"), jsonValue(body, "profession"),
+                        jsonValue(body, "workplace"), jsonValue(body, "permissions"));
+                writeJson(exchange, 200, registrationJson(registration));
+                return;
+            }
+            writeJson(exchange, 404, "{\"error\":\"Not found\"}");
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private boolean isRegistrarAuthenticated(HttpExchange exchange) {
+        String header = exchange.getRequestHeaders().getFirst("Authorization");
+        return header != null && header.startsWith("Bearer ")
+                && registrarTokens.contains(header.substring("Bearer ".length()).trim());
     }
 
     private void handleChats(HttpExchange exchange) throws IOException {
@@ -124,8 +194,16 @@ public final class ChatServer implements AutoCloseable {
 
     private static String registrationJson(ChatRepository.Registration registration) {
         return "{\"username\":\"" + escape(registration.username()) + "\",\"displayName\":\"" +
-                escape(registration.displayName()) + "\",\"status\":\"" + registration.status() +
+                escape(registration.displayName()) + "\",\"profession\":\"" +
+                escape(registration.profession()) + "\",\"workplace\":\"" +
+                escape(registration.workplace()) + "\",\"permissions\":\"" +
+                escape(registration.permissions()) + "\",\"status\":\"" + registration.status() +
                 "\",\"createdAt\":\"" + registration.createdAt() + "\"}";
+    }
+
+    private static String registrationsJson(List<ChatRepository.Registration> registrations) {
+        return "[" + registrations.stream().map(ChatServer::registrationJson)
+                .collect(java.util.stream.Collectors.joining(",")) + "]";
     }
 
     private static String jsonValue(String json, String key) {

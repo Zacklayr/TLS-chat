@@ -254,6 +254,10 @@
             <input class="search" id="username" required minlength="3" maxlength="32"
               pattern="[A-Za-z0-9_]+" placeholder="Логин">
             <input class="search" id="displayName" required maxlength="80" placeholder="Ваше имя">
+            <input class="search" id="password" required minlength="8" maxlength="128"
+              type="password" placeholder="Пароль (минимум 8 символов)">
+            <input class="search" id="profession" required maxlength="80" placeholder="Профессия">
+            <input class="search" id="workplace" required maxlength="80" placeholder="Место работы">
             <button class="btn primary" type="submit">Подать заявку</button>
             <small id="registrationStatus"></small>
           </form>
@@ -444,7 +448,10 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         username: $("username").value.trim(),
-        displayName: $("displayName").value.trim()
+        displayName: $("displayName").value.trim(),
+        password: $("password").value,
+        profession: $("profession").value.trim(),
+        workplace: $("workplace").value.trim()
       })
     });
     const result = await response.json();
