@@ -15,6 +15,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Set;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -23,6 +24,7 @@ public final class ChatServer implements AutoCloseable {
     private final HttpServer server;
     private final ChatRepository repository;
     private final Set<String> registrarTokens = ConcurrentHashMap.newKeySet();
+    private final Map<String, ChatRepository.UserAccount> userTokens = new ConcurrentHashMap<>();
 
     public ChatServer(int port, Path database) throws IOException, SQLException {
         String databaseUrl = System.getenv("DATABASE_URL");
@@ -31,10 +33,38 @@ public final class ChatServer implements AutoCloseable {
                 : databaseUrl);
         server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/api/registration", this::handleRegistration);
+        server.createContext("/api/login", this::handleLogin);
         server.createContext("/api/registrar", this::handleRegistrar);
         server.createContext("/api/chats", this::handleChats);
         server.createContext("/", this::handlePage);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    private void handleLogin(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            ChatRepository.UserAccount account = repository.authenticate(
+                    jsonValue(body, "username"), jsonValue(body, "password"));
+            String token = UUID.randomUUID().toString();
+            userTokens.put(token, account);
+            writeJson(exchange, 200, "{\"token\":\"" + token + "\",\"username\":\"" +
+                    escape(account.username()) + "\",\"displayName\":\"" +
+                    escape(account.displayName()) + "\",\"profession\":\"" +
+                    escape(account.profession()) + "\",\"workplace\":\"" +
+                    escape(account.workplace()) + "\",\"region\":\"" +
+                    escape(account.region()) + "\",\"permissions\":\"" +
+                    escape(account.permissions()) + "\"}");
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 401, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
     }
 
     public void start() {

@@ -35,6 +35,8 @@ final class PasswordHasher {
             return java.security.MessageDigest.isEqual(actual, expected);
         } catch (IllegalArgumentException e) {
             return false;
+        } finally {
+            Arrays.fill(password, '\0');
         }
     }
 

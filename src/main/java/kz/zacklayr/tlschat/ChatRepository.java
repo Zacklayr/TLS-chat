@@ -270,8 +270,8 @@ public final class ChatRepository implements AutoCloseable {
         Registration request = findRequest(requestId);
         if ("APPROVED".equals(status)) {
             if (username == null || !username.matches("[a-zA-Z0-9_]{3,32}")
-                    || password == null || password.length() < 8 || password.length() > 128) {
-                throw new IllegalArgumentException("Регистратор должен указать логин и пароль (8-128 символов)");
+                    || password == null || password.isBlank() || password.length() > 128) {
+                throw new IllegalArgumentException("Регистратор должен указать логин и временный пароль");
             }
             if (fullName == null || fullName.isBlank() || profession == null || profession.isBlank()
                     || workplace == null || workplace.isBlank() || region == null || region.isBlank()
@@ -338,6 +338,28 @@ public final class ChatRepository implements AutoCloseable {
         }
     }
 
+    public synchronized UserAccount authenticate(String username, String password) throws SQLException {
+        if (username == null || password == null || username.isBlank() || password.isEmpty()) {
+            throw new IllegalArgumentException("Неверный логин или пароль");
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT username, display_name, profession, workplace, region, phone, permissions, " +
+                        "password_salt, password_hash FROM users WHERE username = ? AND status = 'APPROVED'")) {
+            statement.setString(1, username.toLowerCase(Locale.ROOT));
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next() || result.getString("password_hash").isBlank()
+                        || !PasswordHasher.verify(password.toCharArray(), result.getString("password_salt"),
+                        result.getString("password_hash"))) {
+                    throw new IllegalArgumentException("Неверный логин или пароль");
+                }
+                return new UserAccount(result.getString("username"), result.getString("display_name"),
+                        result.getString("profession"), result.getString("workplace"),
+                        result.getString("region"), result.getString("phone"),
+                        result.getString("permissions"));
+            }
+        }
+    }
+
     static String normalizePermissions(String permissions) {
         if (permissions == null || permissions.isBlank()) {
             return "";
@@ -378,5 +400,9 @@ public final class ChatRepository implements AutoCloseable {
     public record Registration(String id, String fullName, String profession, String workplace,
                                String region, String phone, String permissions, String status,
                                String accountUsername, Instant createdAt) {
+    }
+
+    public record UserAccount(String username, String displayName, String profession,
+                              String workplace, String region, String phone, String permissions) {
     }
 }

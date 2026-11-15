@@ -108,6 +108,14 @@ java -cp "target\classes;target\dependency\*" kz.zacklayr.tlschat.RegistrarApp h
 
 Для Heroku передайте приложению URL вида `https://<app-name>.herokuapp.com`. Первого регистратора не нужно добавлять в базу вручную: задайте обе Config Vars в Heroku Settings → Config Vars. Секреты не добавляйте в Git и не отправляйте в чат.
 
+Сотрудник входит через `/api/login` после одобрения заявки. Регистратор задаёт ему логин и временный пароль в панели. Для самостоятельного Windows-приложения регистратора на компьютере с JDK 25 выполните:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-registrar-exe.ps1
+```
+
+Готовый запуск находится в `dist\TLS-Chat-Registrar\TLS-Chat-Registrar.exe`. Введите в нём адрес Heroku, логин и пароль регистратора. Приложение не требует открытия исходного кода или запуска Maven после сборки.
+
 ### Негізгі бағдарламалау паттерні: Observer
 
 Хабарламаларды клиенттерге тарату үшін жобаның негізгі паттерні ретінде **Observer** таңдалды. `MessageBroadcaster` — хабарлама жариялаушысы (Subject), ал `MessageListener` — бақылаушы (Observer). Жаңа клиент қосылғанда ол listener ретінде тіркеледі, ал хабарлама келгенде `broadcast` барлық тіркелген клиенттерге шақырылады. Сондықтан хабар тарату логикасы нақты клиенттерге тәуелді болмайды.
