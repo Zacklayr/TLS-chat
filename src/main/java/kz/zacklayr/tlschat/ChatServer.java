@@ -19,7 +19,10 @@ public final class ChatServer implements AutoCloseable {
     private final ChatRepository repository;
 
     public ChatServer(int port, Path database) throws IOException, SQLException {
-        repository = new ChatRepository("jdbc:sqlite:" + database.toAbsolutePath());
+        String databaseUrl = System.getenv("DATABASE_URL");
+        repository = new ChatRepository(databaseUrl == null || databaseUrl.isBlank()
+                ? "jdbc:sqlite:" + database.toAbsolutePath()
+                : databaseUrl);
         server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/api/registration", this::handleRegistration);
         server.createContext("/api/chats", this::handleChats);
@@ -173,7 +176,9 @@ public final class ChatServer implements AutoCloseable {
     }
 
     public static void main(String[] args) throws Exception {
-        int port = args.length > 0 ? Integer.parseInt(args[0]) : 8080;
+        int port = args.length > 0
+                ? Integer.parseInt(args[0])
+                : Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
         Path database = Path.of(args.length > 1 ? args[1] : "tls-chat.db");
         ChatServer chatServer = new ChatServer(port, database);
         Runtime.getRuntime().addShutdownHook(new Thread(chatServer::close));

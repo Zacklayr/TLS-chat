@@ -12,9 +12,12 @@ import java.util.Locale;
 
 public final class ChatRepository implements AutoCloseable {
     private final Connection connection;
+    private final boolean postgres;
 
     public ChatRepository(String jdbcUrl) throws SQLException {
-        connection = java.sql.DriverManager.getConnection(jdbcUrl);
+        postgres = jdbcUrl.startsWith("postgres://") || jdbcUrl.startsWith("postgresql://")
+                || jdbcUrl.startsWith("jdbc:postgresql:");
+        connection = java.sql.DriverManager.getConnection(normalizeJdbcUrl(jdbcUrl));
         initialize();
     }
 
@@ -30,7 +33,15 @@ public final class ChatRepository implements AutoCloseable {
                         online INTEGER NOT NULL DEFAULT 0
                     )
                     """);
-            statement.executeUpdate("""
+            statement.executeUpdate(postgres ? """
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id BIGSERIAL PRIMARY KEY,
+                        chat_id TEXT NOT NULL REFERENCES chats(id),
+                        sender TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        sent_at TEXT NOT NULL
+                    )
+                    """ : """
                     CREATE TABLE IF NOT EXISTS messages (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         chat_id TEXT NOT NULL REFERENCES chats(id),
@@ -39,7 +50,15 @@ public final class ChatRepository implements AutoCloseable {
                         sent_at TEXT NOT NULL
                     )
                     """);
-            statement.executeUpdate("""
+            statement.executeUpdate(postgres ? """
+                    CREATE TABLE IF NOT EXISTS users (
+                        id BIGSERIAL PRIMARY KEY,
+                        username TEXT NOT NULL UNIQUE,
+                        display_name TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
+                        created_at TEXT NOT NULL
+                    )
+                    """ : """
                     CREATE TABLE IF NOT EXISTS users (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         username TEXT NOT NULL UNIQUE,
@@ -49,6 +68,19 @@ public final class ChatRepository implements AutoCloseable {
                     )
                     """);
         }
+    }
+
+    private static String normalizeJdbcUrl(String jdbcUrl) {
+        if (jdbcUrl.startsWith("jdbc:")) {
+            return jdbcUrl;
+        }
+        if (jdbcUrl.startsWith("postgres://")) {
+            return "jdbc:postgresql://" + jdbcUrl.substring("postgres://".length());
+        }
+        if (jdbcUrl.startsWith("postgresql://")) {
+            return "jdbc:" + jdbcUrl;
+        }
+        return jdbcUrl;
     }
 
     public synchronized List<ChatSummary> findChats() throws SQLException {
@@ -118,7 +150,8 @@ public final class ChatRepository implements AutoCloseable {
             statement.setString(3, createdAt.toString());
             statement.executeUpdate();
         } catch (SQLException e) {
-            if (e.getMessage() != null && e.getMessage().contains("UNIQUE")) {
+            if ("23505".equals(e.getSQLState())
+                    || (e.getMessage() != null && e.getMessage().contains("UNIQUE"))) {
                 throw new IllegalArgumentException("Пользователь с таким именем уже зарегистрирован");
             }
             throw e;

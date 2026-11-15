@@ -86,6 +86,8 @@ java -cp "target\classes;$env:USERPROFILE\.m2\repository\org\xerial\sqlite-jdbc\
 powershell -ExecutionPolicy Bypass -File .\start-server.ps1
 ```
 
+Для Heroku проект содержит `Procfile` и `system.properties`. Сервер использует порт из переменной `PORT`, которую Heroku задаёт автоматически. Если Heroku задаёт `DATABASE_URL`, приложение использует PostgreSQL; без неё локально используется SQLite. Поэтому перед рабочим запуском нужно добавить Heroku Postgres и не хранить production-данные в SQLite.
+
 ### Негізгі бағдарламалау паттерні: Observer
 
 Хабарламаларды клиенттерге тарату үшін жобаның негізгі паттерні ретінде **Observer** таңдалды. `MessageBroadcaster` — хабарлама жариялаушысы (Subject), ал `MessageListener` — бақылаушы (Observer). Жаңа клиент қосылғанда ол listener ретінде тіркеледі, ал хабарлама келгенде `broadcast` барлық тіркелген клиенттерге шақырылады. Сондықтан хабар тарату логикасы нақты клиенттерге тәуелді болмайды.
