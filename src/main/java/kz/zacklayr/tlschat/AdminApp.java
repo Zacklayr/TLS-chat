@@ -139,7 +139,7 @@ public final class AdminApp {
 
     private String login(String url, String username, String password) throws Exception {
         String response = request(url, "POST", "/api/admin/login",
-                "{\"username\":\"" + escape(username) + "\",\"password\":\"" + escape(password) + "\"}", null);
+                "{\"username\":\"" + escape(username.trim()) + "\",\"password\":\"" + escape(password) + "\"}", null);
         return jsonValue(response, "token");
     }
 

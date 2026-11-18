@@ -113,8 +113,8 @@ public final class ChatServer implements AutoCloseable {
                 }
                 String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
                 boolean validUsername = MessageDigest.isEqual(
-                        configuredUsername.getBytes(StandardCharsets.UTF_8),
-                        jsonValue(body, "username").getBytes(StandardCharsets.UTF_8));
+                        configuredUsername.trim().getBytes(StandardCharsets.UTF_8),
+                        jsonValue(body, "username").trim().getBytes(StandardCharsets.UTF_8));
                 boolean validPassword = MessageDigest.isEqual(
                         configuredPassword.getBytes(StandardCharsets.UTF_8),
                         jsonValue(body, "password").getBytes(StandardCharsets.UTF_8));
