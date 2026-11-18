@@ -116,7 +116,7 @@ public final class ChatServer implements AutoCloseable {
                         configuredUsername.trim().getBytes(StandardCharsets.UTF_8),
                         jsonValue(body, "username").trim().getBytes(StandardCharsets.UTF_8));
                 boolean validPassword = MessageDigest.isEqual(
-                        configuredPassword.getBytes(StandardCharsets.UTF_8),
+                        configuredPassword.trim().getBytes(StandardCharsets.UTF_8),
                         jsonValue(body, "password").getBytes(StandardCharsets.UTF_8));
                 if (!validUsername || !validPassword) {
                     writeJson(exchange, 401, "{\"error\":\"Invalid registrar credentials\"}");
@@ -177,7 +177,7 @@ public final class ChatServer implements AutoCloseable {
                         configuredUsername.getBytes(StandardCharsets.UTF_8),
                         jsonValue(body, "username").getBytes(StandardCharsets.UTF_8));
                 boolean validPassword = MessageDigest.isEqual(
-                        configuredPassword.getBytes(StandardCharsets.UTF_8),
+                        configuredPassword.trim().getBytes(StandardCharsets.UTF_8),
                         jsonValue(body, "password").getBytes(StandardCharsets.UTF_8));
                 if (!validUsername || !validPassword) {
                     writeJson(exchange, 401, "{\"error\":\"Invalid admin credentials\"}");
