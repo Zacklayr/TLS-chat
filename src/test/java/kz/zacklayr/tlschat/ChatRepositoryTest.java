@@ -61,6 +61,51 @@ class ChatRepositoryTest {
         }
     }
 
+    @Test
+    void assignsChatByDepartmentRule() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            repository.createChat("support", "department", "Техподдержка", "#ff8800",
+                    "", "Техподдержка", "");
+            repository.createChat("general", "global", "Общий чат", "#00ff88",
+                    "", "", "global_write");
+
+            ChatRepository.Registration app = repository.registerApplication(
+                    "Канат Техов", "Специалист поддержки", "Техподдержка", "Алматы", "+77005554433");
+            repository.decideRegistration(app.id(), "APPROVED", "Канат Техов", "Специалист поддержки",
+                    "Техподдержка", "Алматы", "+77005554433", "", "kanat", "pass123");
+            repository.assignChatsForUser("kanat");
+
+            var chats = repository.findChatsForUser(repository.authenticate("kanat", "pass123"));
+            assertEquals(2, chats.size());
+        }
+    }
+
+    @Test
+    void persistsSessionsAndCreatesCeoDirectChat() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration ceoApplication = repository.registerApplication(
+                    "Chief Executive", "Гендиректор", "Высшее руководство", "Алматы", "+77000000001");
+            repository.decideRegistration(ceoApplication.id(), "APPROVED", "Chief Executive",
+                    "Гендиректор", "Высшее руководство", "Алматы", "+77000000001",
+                    "ceo", "ceo", "secure-pass");
+            ChatRepository.Registration employeeApplication = repository.registerApplication(
+                    "Employee", "Разработчик", "Разработка движка", "Алматы", "+77000000002");
+            repository.decideRegistration(employeeApplication.id(), "APPROVED", "Employee",
+                    "Разработчик", "Разработка движка", "Алматы", "+77000000002",
+                    "", "employee", "secure-pass");
+
+            ChatRepository.UserAccount ceo = repository.authenticate("ceo", "secure-pass");
+            String token = repository.createSession("USER", ceo.username());
+            assertEquals(ceo.username(), repository.findSession(token).username());
+
+            ChatRepository.ChatDefinition direct = repository.ensureDirectChat(ceo, "employee");
+            repository.addMessage(direct.id(), "ceo", ceo.permissions(), "Important message");
+            assertEquals(1, repository.findMessages(direct.id(), "employee").size());
+        }
+    }
+
     @AfterEach
     void removeDatabase() throws Exception {
         if (database != null) {

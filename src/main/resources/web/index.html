@@ -42,7 +42,7 @@
     content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 999;
     background: repeating-linear-gradient(to bottom, transparent 0 2px, rgba(0,0,0,0.12) 2px 3px);
   }
-  button, input, textarea { font: inherit; color: inherit; }
+  button, input, textarea, select { font: inherit; color: inherit; }
   button { cursor: pointer; }
 
   /* ---------- окно ---------- */
@@ -98,6 +98,9 @@
   }
   .search:focus { box-shadow: inset 1px 1px 3px #000, 0 0 0 1px var(--accent-2); }
   .search::placeholder { color: var(--faint); }
+  select.search { cursor: pointer; color: var(--text); }
+  select.search option { background: #0d121c; color: var(--text); }
+  select.search:invalid, select.search option[value=""] { color: var(--faint); }
   .folders { display: flex; gap: 4px; padding: 6px; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; }
   .folders button {
     padding: 3px 8px; font-size: 12px; color: var(--muted); background: #0a0f19;
@@ -235,6 +238,8 @@
     <aside class="sidebar">
       <div class="side-top">
         <input class="search" id="search" placeholder="Поиск чатов…">
+        <select class="search" id="ceoUser" style="display:none" title="Начать личный чат"></select>
+        <button class="btn" id="startDirect" style="display:none" title="Написать сотруднику">DM</button>
       </div>
       <div class="folders">
         <button class="on" data-f="all">Все</button>
@@ -253,7 +258,23 @@
           <form id="registration" style="display:grid;gap:6px;max-width:260px;margin:14px auto 0">
             <input class="search" id="fullName" required maxlength="120" placeholder="ФИО">
             <input class="search" id="profession" required maxlength="80" placeholder="Профессия">
-            <input class="search" id="workplace" required maxlength="80" placeholder="Место работы">
+            <select class="search" id="workplace" required>
+              <option value="" disabled selected hidden>Отдел...</option>
+              <option value="Высшее руководство">Высшее руководство</option>
+              <option value="Разработка движка">Разработка движка</option>
+              <option value="Разработка интеграций и портирования">Разработка интеграций и портирования</option>
+              <option value="Геймдизайн">Геймдизайн</option>
+              <option value="Арт и анимация">Арт и анимация</option>
+              <option value="Нарратив и сценарий">Нарратив и сценарий</option>
+              <option value="Звук">Звук</option>
+              <option value="Локализация и адаптация">Локализация и адаптация</option>
+              <option value="Техподдержка">Техподдержка</option>
+              <option value="Кибербезопасность">Кибербезопасность</option>
+              <option value="Оборудование и закупки">Оборудование и закупки</option>
+              <option value="HR">HR</option>
+              <option value="QA">QA</option>
+              <option value="Управление проектами">Управление проектами</option>
+            </select>
             <input class="search" id="region" required maxlength="80" placeholder="Регион / город">
             <input class="search" id="phone" required maxlength="32" placeholder="Номер телефона">
             <button class="btn primary" type="submit">Подать заявку</button>
@@ -299,7 +320,12 @@
 <script>
   let chats = [];
   let currentUser = null;
-  let authToken = null;
+  let authToken = localStorage.getItem("tlsChatToken");
+  try {
+    currentUser = JSON.parse(localStorage.getItem("tlsChatUser") || "null");
+  } catch (_) {
+    currentUser = null;
+  }
 
   let current = null;
   let filter = "all";
@@ -318,6 +344,35 @@
     chats = await response.json();
     chats.forEach(c => c.msgs = []);
     renderChats();
+  }
+
+  async function loadCeoUsers() {
+    if (!currentUser || !currentUser.permissions.split(",").includes("ceo")) return;
+    const response = await fetch("/api/users", { headers: authHeaders() });
+    if (!response.ok) return;
+    const users = await response.json();
+    $("ceoUser").innerHTML = `<option value="">Сотрудник…</option>` +
+      users.filter(u => u.username !== currentUser.username)
+        .map(u => `<option value="${esc(u.username)}">${esc(u.displayName)} · ${esc(u.profession)}</option>`).join("");
+    $("ceoUser").style.display = "block";
+    $("startDirect").style.display = "block";
+  }
+
+  async function startDirectChat() {
+    const username = $("ceoUser").value;
+    if (!username) return;
+    const response = await fetch("/api/chats/direct", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ username })
+    });
+    if (!response.ok) {
+      $("typing").textContent = "Не удалось открыть личный чат";
+      return;
+    }
+    await loadChats();
+    const chat = await response.json();
+    await openChat(chat.id);
   }
 
   async function loadMessages(chat) {
@@ -440,6 +495,7 @@
   }));
   $("search").addEventListener("input", renderChats);
   $("send").addEventListener("click", send);
+  $("startDirect").addEventListener("click", startDirectChat);
   $("input").addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
@@ -488,10 +544,23 @@
     }
     authToken = result.token;
     currentUser = result;
+    localStorage.setItem("tlsChatToken", authToken);
+    localStorage.setItem("tlsChatUser", JSON.stringify(result));
     $("whoami").textContent = `${result.displayName} · ${result.profession}`;
     $("empty").style.display = "none";
     await loadChats();
+    await loadCeoUsers();
   });
+
+  if (authToken && currentUser) {
+    $("whoami").textContent = `${currentUser.displayName} · ${currentUser.profession}`;
+    loadChats().then(loadCeoUsers).catch(() => {
+      localStorage.removeItem("tlsChatToken");
+      localStorage.removeItem("tlsChatUser");
+      authToken = null;
+      currentUser = null;
+    });
+  }
 
 </script>
 </body>

@@ -13,20 +13,12 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.util.Set;
 import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
 public final class ChatServer implements AutoCloseable {
     private final HttpServer server;
     private final ChatRepository repository;
-    private final Set<String> registrarTokens = ConcurrentHashMap.newKeySet();
-    private final Set<String> adminTokens = ConcurrentHashMap.newKeySet();
-    private final Map<String, ChatRepository.UserAccount> userTokens = new ConcurrentHashMap<>();
-
     public ChatServer(int port, Path database) throws IOException, SQLException {
         String databaseUrl = System.getenv("DATABASE_URL");
         repository = new ChatRepository(databaseUrl == null || databaseUrl.isBlank()
@@ -38,16 +30,19 @@ public final class ChatServer implements AutoCloseable {
         server.createContext("/api/registrar", this::handleRegistrar);
         server.createContext("/api/admin", this::handleAdmin);
         server.createContext("/api/chats", this::handleChats);
+        server.createContext("/api/users", this::handleUsers);
         server.createContext("/", this::handlePage);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
 
-    private ChatRepository.UserAccount authenticatedUser(HttpExchange exchange) {
+    private ChatRepository.UserAccount authenticatedUser(HttpExchange exchange) throws SQLException {
         String header = exchange.getRequestHeaders().getFirst("Authorization");
         if (header == null || !header.startsWith("Bearer ")) {
             return null;
         }
-        return userTokens.get(header.substring("Bearer ".length()).trim());
+        ChatRepository.Session session = repository.findSession(header.substring("Bearer ".length()).trim());
+        return session == null || !"USER".equals(session.role())
+                ? null : repository.findApprovedUser(session.username());
     }
 
     private void handleLogin(HttpExchange exchange) throws IOException {
@@ -59,8 +54,7 @@ public final class ChatServer implements AutoCloseable {
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             ChatRepository.UserAccount account = repository.authenticate(
                     jsonValue(body, "username"), jsonValue(body, "password"));
-            String token = UUID.randomUUID().toString();
-            userTokens.put(token, account);
+            String token = repository.createSession("USER", account.username());
             writeJson(exchange, 200, "{\"token\":\"" + token + "\",\"username\":\"" +
                     escape(account.username()) + "\",\"displayName\":\"" +
                     escape(account.displayName()) + "\",\"profession\":\"" +
@@ -128,8 +122,7 @@ public final class ChatServer implements AutoCloseable {
                     writeJson(exchange, 401, "{\"error\":\"Invalid registrar credentials\"}");
                     return;
                 }
-                String token = UUID.randomUUID().toString();
-                registrarTokens.add(token);
+                String token = repository.createSession("REGISTRAR", "");
                 writeJson(exchange, 200, "{\"token\":\"" + token + "\"}");
                 return;
             }
@@ -190,8 +183,7 @@ public final class ChatServer implements AutoCloseable {
                     writeJson(exchange, 401, "{\"error\":\"Invalid admin credentials\"}");
                     return;
                 }
-                String token = UUID.randomUUID().toString();
-                adminTokens.add(token);
+                    String token = repository.createSession("ADMIN", "");
                 writeJson(exchange, 200, "{\"token\":\"" + token + "\"}");
                 return;
             }
@@ -222,29 +214,35 @@ public final class ChatServer implements AutoCloseable {
         }
     }
 
-    private boolean isAdminAuthenticated(HttpExchange exchange) {
+    private boolean isAdminAuthenticated(HttpExchange exchange) throws SQLException {
         String header = exchange.getRequestHeaders().getFirst("Authorization");
-        return header != null && header.startsWith("Bearer ")
-                && adminTokens.contains(header.substring("Bearer ".length()).trim());
+        if (header == null || !header.startsWith("Bearer ")) return false;
+        ChatRepository.Session session = repository.findSession(header.substring("Bearer ".length()).trim());
+        return session != null && "ADMIN".equals(session.role());
     }
 
-    private boolean isRegistrarAuthenticated(HttpExchange exchange) {
+    private boolean isRegistrarAuthenticated(HttpExchange exchange) throws SQLException {
         String header = exchange.getRequestHeaders().getFirst("Authorization");
-        return header != null && header.startsWith("Bearer ")
-                && registrarTokens.contains(header.substring("Bearer ".length()).trim());
+        if (header == null || !header.startsWith("Bearer ")) return false;
+        ChatRepository.Session session = repository.findSession(header.substring("Bearer ".length()).trim());
+        return session != null && "REGISTRAR".equals(session.role());
     }
 
     private void handleChats(HttpExchange exchange) throws IOException {
-        ChatRepository.UserAccount account = authenticatedUser(exchange);
-        if (account == null) {
-            writeJson(exchange, 401, "{\"error\":\"Login required\"}");
-            exchange.close();
-            return;
-        }
         try {
+            ChatRepository.UserAccount account = authenticatedUser(exchange);
+            if (account == null) {
+                writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+                return;
+            }
             String path = exchange.getRequestURI().getPath();
             String[] parts = path.split("/");
-            if ("GET".equals(exchange.getRequestMethod()) && "/api/chats".equals(path)) {
+            if ("POST".equals(exchange.getRequestMethod()) && "/api/chats/direct".equals(path)) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                ChatRepository.ChatDefinition chat = repository.ensureDirectChat(
+                        account, jsonValue(body, "username"));
+                writeJson(exchange, 201, chatJson(chat));
+            } else if ("GET".equals(exchange.getRequestMethod()) && "/api/chats".equals(path)) {
                 writeJson(exchange, 200, chatsJson(repository.findChatsForUser(account)));
             } else if ("GET".equals(exchange.getRequestMethod()) && parts.length == 4 && !parts[3].isBlank()) {
                 writeJson(exchange, 200, messagesJson(repository.findMessages(parts[3], account.username())));
@@ -263,6 +261,31 @@ public final class ChatServer implements AutoCloseable {
         } finally {
             exchange.close();
         }
+    }
+
+    private void handleUsers(HttpExchange exchange) throws IOException {
+        try {
+            ChatRepository.UserAccount account = authenticatedUser(exchange);
+            if (account == null || !hasPermission(account, "ceo")) {
+                writeJson(exchange, 403, "{\"error\":\"CEO permission required\"}");
+                return;
+            }
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            writeJson(exchange, 200, usersJson(repository.approvedUsers()));
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private static boolean hasPermission(ChatRepository.UserAccount user, String permission) {
+        return user != null && List.of(user.permissions().split(",")).contains(permission);
     }
 
     private void handlePage(HttpExchange exchange) throws IOException {
@@ -331,6 +354,14 @@ public final class ChatServer implements AutoCloseable {
 
     private static String adminChatsJson(List<ChatRepository.ChatDefinition> chats) {
         return "[" + chats.stream().map(ChatServer::chatJson)
+                .collect(java.util.stream.Collectors.joining(",")) + "]";
+    }
+
+    private static String usersJson(List<ChatRepository.UserAccount> users) {
+        return "[" + users.stream().map(user -> "{\"username\":\"" + escape(user.username()) +
+                "\",\"displayName\":\"" + escape(user.displayName()) + "\",\"profession\":\"" +
+                escape(user.profession()) + "\",\"workplace\":\"" + escape(user.workplace()) +
+                "\",\"region\":\"" + escape(user.region()) + "\"}")
                 .collect(java.util.stream.Collectors.joining(",")) + "]";
     }
 

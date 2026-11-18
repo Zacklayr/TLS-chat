@@ -1,30 +1,55 @@
 package kz.zacklayr.tlschat;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.net.URI;
 import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
 public final class ChatRepository implements AutoCloseable {
-    private final Connection connection;
+    private static final long SESSION_DAYS = 30;
+    private static final Set<String> ALLOWED_PERMISSIONS = Set.of(
+            "ceo", "department_lead", "global_write", "regional_write",
+            "support_agent", "hidden_data", "manage_users", "manage_chats"
+    );
+
+    private final String normalizedJdbcUrl;
     private final boolean postgres;
+    private Connection connection;
 
     public ChatRepository(String jdbcUrl) throws SQLException {
         postgres = jdbcUrl.startsWith("postgres://") || jdbcUrl.startsWith("postgresql://")
                 || jdbcUrl.startsWith("jdbc:postgresql:");
-        connection = java.sql.DriverManager.getConnection(normalizeJdbcUrl(jdbcUrl));
+        normalizedJdbcUrl = normalizeJdbcUrl(jdbcUrl);
+        connection = java.sql.DriverManager.getConnection(normalizedJdbcUrl);
         initialize();
+    }
+
+    private synchronized Connection conn() throws SQLException {
+        if (connection == null || connection.isClosed() || !connection.isValid(2)) {
+            if (connection != null) {
+                try {
+                    connection.close();
+                } catch (SQLException ignored) {
+                }
+            }
+            connection = java.sql.DriverManager.getConnection(normalizedJdbcUrl);
+        }
+        return connection;
     }
 
     private void initialize() throws SQLException {
@@ -39,6 +64,7 @@ public final class ChatRepository implements AutoCloseable {
                         online INTEGER NOT NULL DEFAULT 0,
                         profession_rule TEXT NOT NULL DEFAULT '',
                         workplace_rule TEXT NOT NULL DEFAULT '',
+                        region_rule TEXT NOT NULL DEFAULT '',
                         write_permissions TEXT NOT NULL DEFAULT ''
                     )
                     """);
@@ -99,6 +125,7 @@ public final class ChatRepository implements AutoCloseable {
             ensureUserColumn(statement, "password_hash", "TEXT NOT NULL DEFAULT ''");
             ensureChatColumn(statement, "profession_rule", "TEXT NOT NULL DEFAULT ''");
             ensureChatColumn(statement, "workplace_rule", "TEXT NOT NULL DEFAULT ''");
+            ensureChatColumn(statement, "region_rule", "TEXT NOT NULL DEFAULT ''");
             ensureChatColumn(statement, "write_permissions", "TEXT NOT NULL DEFAULT ''");
             statement.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS registration_requests (
@@ -118,6 +145,15 @@ public final class ChatRepository implements AutoCloseable {
                         chat_id TEXT NOT NULL,
                         username TEXT NOT NULL,
                         PRIMARY KEY (chat_id, username)
+                    )
+                    """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        token TEXT PRIMARY KEY,
+                        role TEXT NOT NULL,
+                        username TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
                     )
                     """);
         }
@@ -188,7 +224,7 @@ public final class ChatRepository implements AutoCloseable {
 
     public synchronized List<ChatSummary> findChats() throws SQLException {
         List<ChatSummary> chats = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count " +
                         "FROM chats c ORDER BY c.type, c.name");
              ResultSet result = statement.executeQuery()) {
@@ -203,7 +239,7 @@ public final class ChatRepository implements AutoCloseable {
 
     public synchronized List<ChatSummary> findChatsForUser(UserAccount user) throws SQLException {
         List<ChatSummary> chats = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT c.*, (SELECT COUNT(*) FROM chat_members cm2 WHERE cm2.chat_id = c.id) AS member_count, " +
                         "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count " +
                         "FROM chats c JOIN chat_members cm ON cm.chat_id = c.id AND cm.username = ? " +
@@ -228,16 +264,17 @@ public final class ChatRepository implements AutoCloseable {
             throw new IllegalArgumentException("Укажите id, тип, название и цвет чата");
         }
         String normalizedPermissions = normalizePermissions(writePermissions);
-        try (PreparedStatement statement = connection.prepareStatement(
-                "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, write_permissions) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+        try (PreparedStatement statement = conn().prepareStatement(
+                "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
             statement.setString(1, id);
             statement.setString(2, type.trim());
             statement.setString(3, name.trim());
             statement.setString(4, color.trim());
             statement.setString(5, professionRule == null ? "" : professionRule.trim());
             statement.setString(6, workplaceRule == null ? "" : workplaceRule.trim());
-            statement.setString(7, normalizedPermissions);
+            statement.setString(7, "");
+            statement.setString(8, normalizedPermissions);
             statement.executeUpdate();
         }
         assignUsersToChat(id);
@@ -249,7 +286,7 @@ public final class ChatRepository implements AutoCloseable {
     private void assignUsersToChat(String chatId) throws SQLException {
         String sql = "SELECT username FROM users WHERE status = 'APPROVED' AND username NOT IN " +
                 "(SELECT username FROM chat_members WHERE chat_id = ?)";
-        try (PreparedStatement users = connection.prepareStatement(sql)) {
+        try (PreparedStatement users = conn().prepareStatement(sql)) {
             users.setString(1, chatId);
             try (ResultSet result = users.executeQuery()) {
                 while (result.next()) {
@@ -260,18 +297,20 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     public synchronized void assignChatsForUser(String username) throws SQLException {
-        try (PreparedStatement user = connection.prepareStatement(
-                "SELECT profession, workplace FROM users WHERE username = ?")) {
+        try (PreparedStatement user = conn().prepareStatement(
+                "SELECT profession, workplace, region FROM users WHERE username = ?")) {
             user.setString(1, username);
             try (ResultSet userResult = user.executeQuery()) {
                 if (!userResult.next()) {
                     return;
                 }
-                try (PreparedStatement chats = connection.prepareStatement(
+                try (PreparedStatement chats = conn().prepareStatement(
                         "SELECT id FROM chats WHERE (profession_rule = '' OR profession_rule = ?) " +
-                                "AND (workplace_rule = '' OR workplace_rule = ?)")) {
+                                "AND (workplace_rule = '' OR workplace_rule = ?) " +
+                                "AND (region_rule = '' OR region_rule = ?)")) {
                     chats.setString(1, userResult.getString("profession"));
                     chats.setString(2, userResult.getString("workplace"));
+                    chats.setString(3, userResult.getString("region"));
                     try (ResultSet chatResult = chats.executeQuery()) {
                         while (chatResult.next()) {
                             insertMembership(chatResult.getString("id"), username);
@@ -283,7 +322,7 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     private void insertMembership(String chatId, String username) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 postgres ? "INSERT INTO chat_members(chat_id, username) VALUES (?, ?) ON CONFLICT DO NOTHING"
                         : "INSERT OR IGNORE INTO chat_members(chat_id, username) VALUES (?, ?)")) {
             statement.setString(1, chatId);
@@ -294,7 +333,7 @@ public final class ChatRepository implements AutoCloseable {
 
     public synchronized List<ChatDefinition> adminChats() throws SQLException {
         List<ChatDefinition> chats = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT id, type, name, color, profession_rule, workplace_rule, write_permissions " +
                         "FROM chats ORDER BY name");
              ResultSet result = statement.executeQuery()) {
@@ -309,7 +348,7 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     private boolean isMember(String chatId, String username) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT 1 FROM chat_members WHERE chat_id = ? AND username = ?")) {
             statement.setString(1, chatId);
             statement.setString(2, username);
@@ -324,7 +363,7 @@ public final class ChatRepository implements AutoCloseable {
             throw new IllegalArgumentException("Chat is not available");
         }
         List<Message> messages = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT sender, text, sent_at FROM messages WHERE chat_id = ? ORDER BY id")) {
             statement.setString(1, chatId);
             try (ResultSet result = statement.executeQuery()) {
@@ -345,7 +384,7 @@ public final class ChatRepository implements AutoCloseable {
         if (sender == null || sender.isBlank() || text == null || text.isBlank() || text.length() > 4000) {
             throw new IllegalArgumentException("Sender and message text are required; text must be 1..4000 characters");
         }
-        try (PreparedStatement access = connection.prepareStatement(
+        try (PreparedStatement access = conn().prepareStatement(
                 "SELECT write_permissions FROM chats WHERE id = ?")) {
             access.setString(1, chatId);
             try (ResultSet result = access.executeQuery()) {
@@ -355,7 +394,7 @@ public final class ChatRepository implements AutoCloseable {
             }
         }
         Instant sentAt = Instant.now();
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "INSERT INTO messages(chat_id, sender, text, sent_at) VALUES (?, ?, ?, ?)")) {
             statement.setString(1, chatId);
             statement.setString(2, sender);
@@ -383,7 +422,7 @@ public final class ChatRepository implements AutoCloseable {
         String normalizedRegion = region.trim();
         String normalizedPhone = phone.trim();
         Instant createdAt = Instant.now();
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "INSERT INTO registration_requests(id, full_name, profession, workplace, region, phone, created_at) " +
                         "VALUES (?, ?, ?, ?, ?, ?, ?)")) {
             statement.setString(1, requestId);
@@ -401,7 +440,7 @@ public final class ChatRepository implements AutoCloseable {
 
     public synchronized List<Registration> pendingRegistrations() throws SQLException {
         List<Registration> registrations = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT id, full_name, profession, workplace, region, phone, status, account_username, created_at " +
                         "FROM registration_requests WHERE status = 'PENDING' ORDER BY created_at");
              ResultSet result = statement.executeQuery()) {
@@ -432,7 +471,7 @@ public final class ChatRepository implements AutoCloseable {
                 throw new IllegalArgumentException("Анкета сотрудника заполнена не полностью");
             }
             PasswordHasher.PasswordHash passwordHash = PasswordHasher.hash(password.toCharArray());
-            try (PreparedStatement statement = connection.prepareStatement(
+            try (PreparedStatement statement = conn().prepareStatement(
                     "INSERT INTO users(username, display_name, profession, workplace, region, phone, permissions, " +
                             "password_salt, password_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
                 statement.setString(1, username.toLowerCase(Locale.ROOT));
@@ -455,7 +494,7 @@ public final class ChatRepository implements AutoCloseable {
                 throw e;
             }
         }
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "UPDATE registration_requests SET status = ?, account_username = ? WHERE id = ?")) {
             statement.setString(1, status);
             statement.setString(2, "APPROVED".equals(status) ? username.toLowerCase(Locale.ROOT) : "");
@@ -478,7 +517,7 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     private Registration findRequest(String requestId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT id, full_name, profession, workplace, region, phone, status, account_username, created_at " +
                         "FROM registration_requests WHERE id = ?")) {
             statement.setString(1, requestId);
@@ -495,7 +534,7 @@ public final class ChatRepository implements AutoCloseable {
         if (username == null || password == null || username.isBlank() || password.isEmpty()) {
             throw new IllegalArgumentException("Неверный логин или пароль");
         }
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT username, display_name, profession, workplace, region, phone, permissions, " +
                         "password_salt, password_hash FROM users WHERE username = ? AND status = 'APPROVED'")) {
             statement.setString(1, username.toLowerCase(Locale.ROOT));
@@ -517,12 +556,10 @@ public final class ChatRepository implements AutoCloseable {
         if (permissions == null || permissions.isBlank()) {
             return "";
         }
-        Set<String> allowed = Set.of("global_write", "regional_write", "hidden_data",
-                "manage_users", "manage_chats");
         Set<String> selected = new HashSet<>();
         for (String permission : permissions.split(",")) {
             String value = permission.trim();
-            if (!value.isEmpty() && !allowed.contains(value)) {
+            if (!value.isEmpty() && !ALLOWED_PERMISSIONS.contains(value)) {
                 throw new IllegalArgumentException("Unknown permission: " + value);
             }
             if (!value.isEmpty()) {
@@ -533,7 +570,7 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     private boolean chatExists(String chatId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT 1 FROM chats WHERE id = ?")) {
+        try (PreparedStatement statement = conn().prepareStatement("SELECT 1 FROM chats WHERE id = ?")) {
             statement.setString(1, chatId);
             try (ResultSet result = statement.executeQuery()) {
                 return result.next();
@@ -547,12 +584,129 @@ public final class ChatRepository implements AutoCloseable {
         }
         Set<String> actualPermissions = new HashSet<>(
                 Arrays.asList((actual == null ? "" : actual).split(",")));
-        return Arrays.stream(required.split(",")).anyMatch(actualPermissions::contains);
+        return actualPermissions.contains("ceo")
+                || Arrays.stream(required.split(",")).anyMatch(actualPermissions::contains);
+    }
+
+    public synchronized String createSession(String role, String username) throws SQLException {
+        String token = java.util.UUID.randomUUID().toString();
+        Instant now = Instant.now();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "INSERT INTO sessions(token, role, username, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")) {
+            statement.setString(1, token);
+            statement.setString(2, role);
+            statement.setString(3, username == null ? "" : username);
+            statement.setString(4, now.toString());
+            statement.setString(5, now.plus(SESSION_DAYS, ChronoUnit.DAYS).toString());
+            statement.executeUpdate();
+        }
+        return token;
+    }
+
+    public synchronized Session findSession(String token) throws SQLException {
+        if (token == null || token.isBlank()) {
+            return null;
+        }
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT token, role, username, expires_at FROM sessions WHERE token = ?")) {
+            statement.setString(1, token);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                Instant expiresAt = Instant.parse(result.getString("expires_at"));
+                if (expiresAt.isBefore(Instant.now())) {
+                    deleteSession(token);
+                    return null;
+                }
+                return new Session(result.getString("token"), result.getString("role"),
+                        result.getString("username"), expiresAt);
+            }
+        }
+    }
+
+    private void deleteSession(String token) throws SQLException {
+        try (PreparedStatement statement = conn().prepareStatement("DELETE FROM sessions WHERE token = ?")) {
+            statement.setString(1, token);
+            statement.executeUpdate();
+        }
+    }
+
+    public synchronized List<UserAccount> approvedUsers() throws SQLException {
+        List<UserAccount> users = new ArrayList<>();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT username, display_name, profession, workplace, region, phone, permissions " +
+                        "FROM users WHERE status = 'APPROVED' ORDER BY display_name");
+             ResultSet result = statement.executeQuery()) {
+            while (result.next()) {
+                users.add(new UserAccount(result.getString("username"), result.getString("display_name"),
+                        result.getString("profession"), result.getString("workplace"),
+                        result.getString("region"), result.getString("phone"),
+                        result.getString("permissions")));
+            }
+        }
+        return users;
+    }
+
+    public synchronized ChatDefinition ensureDirectChat(UserAccount owner, String targetUsername)
+            throws SQLException {
+        if (!hasPermission(owner, "ceo")) {
+            throw new IllegalArgumentException("Только гендиректор может начинать личные чаты");
+        }
+        UserAccount target = findApprovedUser(targetUsername);
+        if (target == null) {
+            throw new IllegalArgumentException("Сотрудник не найден");
+        }
+        String id = "dm-" + stableId(owner.username() + "-" + target.username());
+        try (PreparedStatement statement = conn().prepareStatement(
+                "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
+                        "VALUES (?, 'direct', ?, '#3a7bd5', '', '', '', '') " +
+                        (postgres ? "ON CONFLICT DO NOTHING" : ""))) {
+            statement.setString(1, id);
+            statement.setString(2, target.displayName());
+            statement.executeUpdate();
+        }
+        insertMembership(id, owner.username());
+        insertMembership(id, target.username());
+        return new ChatDefinition(id, "direct", target.displayName(), "#3a7bd5", "", "", "");
+    }
+
+    public synchronized UserAccount findApprovedUser(String username) throws SQLException {
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT username, display_name, profession, workplace, region, phone, permissions " +
+                        "FROM users WHERE username = ? AND status = 'APPROVED'")) {
+            statement.setString(1, username == null ? "" : username.toLowerCase(Locale.ROOT));
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new UserAccount(result.getString("username"), result.getString("display_name"),
+                        result.getString("profession"), result.getString("workplace"),
+                        result.getString("region"), result.getString("phone"),
+                        result.getString("permissions"));
+            }
+        }
+    }
+
+    private static String stableId(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest, 0, 12);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
+    }
+
+    private static boolean hasPermission(UserAccount user, String permission) {
+        return user != null && Arrays.asList(user.permissions().split(",")).contains(permission);
     }
 
     @Override
     public void close() throws SQLException {
-        connection.close();
+        if (connection != null) {
+            connection.close();
+        }
     }
 
     public record ChatSummary(String id, String type, String name, String color,
@@ -571,5 +725,8 @@ public final class ChatRepository implements AutoCloseable {
 
     public record UserAccount(String username, String displayName, String profession,
                               String workplace, String region, String phone, String permissions) {
+    }
+
+    public record Session(String token, String role, String username, Instant expiresAt) {
     }
 }

@@ -91,7 +91,7 @@ public final class AdminApp {
         name = field(form, "Название:");
         color = field(form, "Цвет:");
         professionRule = field(form, "Профессия (пусто - все):");
-        workplaceRule = field(form, "Место работы (пусто - все):");
+        workplaceRule = field(form, "Отдел (пусто - все):");
         writePermissions = field(form, "Права записи (через запятую):");
         JButton create = new JButton("Создать чат");
         JButton refresh = new JButton("Обновить");
@@ -253,7 +253,7 @@ public final class AdminApp {
         }
 
         public String getColumnName(int column) {
-            return new String[]{"ID", "Тип", "Название", "Профессия", "Место работы", "Права записи"}[column];
+            return new String[]{"ID", "Тип", "Название", "Профессия", "Отдел", "Права записи"}[column];
         }
 
         public Object getValueAt(int row, int column) {

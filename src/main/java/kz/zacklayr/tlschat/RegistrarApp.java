@@ -3,9 +3,9 @@ package kz.zacklayr.tlschat;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
-import javax.swing.JList;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPasswordField;
@@ -16,7 +16,6 @@ import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.table.AbstractTableModel;
-import java.awt.BorderLayout;
 import java.awt.GridLayout;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -28,6 +27,26 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class RegistrarApp {
+
+    // ─── Отделы Avengers Games (из плана проекта) ─────────────────────────────
+    private static final String[] DEPARTMENTS = {
+        "Высшее руководство",
+        "Разработка движка",
+        "Разработка интеграций и портирования",
+        "Геймдизайн",
+        "Арт и анимация",
+        "Нарратив и сценарий",
+        "Звук",
+        "Локализация и адаптация",
+        "Техподдержка",
+        "Кибербезопасность",
+        "Оборудование и закупки",
+        "HR",
+        "QA",
+        "Управление проектами"
+    };
+    // ──────────────────────────────────────────────────────────────────────────
+
     private final HttpClient http = HttpClient.newHttpClient();
     private final String defaultServerUrl;
     private String serverUrl;
@@ -37,13 +56,16 @@ public final class RegistrarApp {
     private JTable table;
     private JTextField fullName;
     private JTextField profession;
-    private JTextField workplace;
+    private JComboBox<String> workplace;
     private JTextField region;
     private JTextField phone;
     private JTextField accountUsername;
     private JPasswordField accountPassword;
     private JCheckBox globalWrite;
     private JCheckBox regionalWrite;
+    private JCheckBox ceo;
+    private JCheckBox departmentLead;
+    private JCheckBox supportAgent;
     private JCheckBox hiddenData;
     private JCheckBox manageUsers;
     private JCheckBox manageChats;
@@ -101,7 +123,7 @@ public final class RegistrarApp {
         JPanel details = new JPanel(new GridLayout(0, 1, 5, 5));
         details.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
         profession = new JTextField();
-        workplace = new JTextField();
+        workplace = new JComboBox<>(DEPARTMENTS);
         region = new JTextField();
         phone = new JTextField();
         accountUsername = new JTextField();
@@ -112,7 +134,7 @@ public final class RegistrarApp {
         details.add(fullName);
         details.add(new JLabel("Профессия:"));
         details.add(profession);
-        details.add(new JLabel("Место работы:"));
+        details.add(new JLabel("Отдел:"));
         details.add(workplace);
         details.add(new JLabel("Регион / город:"));
         details.add(region);
@@ -124,6 +146,9 @@ public final class RegistrarApp {
         details.add(accountPassword);
         globalWrite = permission("Писать в глобальный чат", details);
         regionalWrite = permission("Писать в региональные чаты", details);
+        ceo = permission("Гендиректор: писать всем и открывать личные чаты", details);
+        departmentLead = permission("Руководитель отдела", details);
+        supportAgent = permission("Оператор техподдержки", details);
         hiddenData = permission("Просматривать скрытые данные", details);
         manageUsers = permission("Управлять пользователями", details);
         manageChats = permission("Управлять чатами", details);
@@ -175,7 +200,17 @@ public final class RegistrarApp {
         RegistrationRequest request = requests.get(table.convertRowIndexToModel(row));
         fullName.setText(request.fullName());
         profession.setText(request.profession());
-        workplace.setText(request.workplace());
+        // Пытаемся найти отдел из заявки в списке; если нет — оставляем первый
+        String reqWorkplace = request.workplace();
+        boolean found = false;
+        for (int i = 0; i < workplace.getItemCount(); i++) {
+            if (workplace.getItemAt(i).equals(reqWorkplace)) {
+                workplace.setSelectedIndex(i);
+                found = true;
+                break;
+            }
+        }
+        if (!found) workplace.setSelectedIndex(0);
         region.setText(request.region());
         phone.setText(request.phone());
         accountUsername.setText("");
@@ -191,7 +226,7 @@ public final class RegistrarApp {
         RegistrationRequest request = requests.get(table.convertRowIndexToModel(row));
         String body = "{\"status\":\"" + status + "\",\"fullName\":\"" + escape(request.fullName()) +
                 "\",\"profession\":\"" + escape(profession.getText()) + "\",\"workplace\":\"" +
-                escape(workplace.getText()) + "\",\"region\":\"" + escape(region.getText()) +
+                escape((String) workplace.getSelectedItem()) + "\",\"region\":\"" + escape(region.getText()) +
                 "\",\"phone\":\"" + escape(phone.getText()) + "\",\"username\":\"" +
                 escape(accountUsername.getText()) + "\",\"password\":\"" +
                 escape(new String(accountPassword.getPassword())) + "\",\"permissions\":\"" +
@@ -264,6 +299,9 @@ public final class RegistrarApp {
         List<String> selected = new ArrayList<>();
         if (globalWrite.isSelected()) selected.add("global_write");
         if (regionalWrite.isSelected()) selected.add("regional_write");
+        if (ceo.isSelected()) selected.add("ceo");
+        if (departmentLead.isSelected()) selected.add("department_lead");
+        if (supportAgent.isSelected()) selected.add("support_agent");
         if (hiddenData.isSelected()) selected.add("hidden_data");
         if (manageUsers.isSelected()) selected.add("manage_users");
         if (manageChats.isSelected()) selected.add("manage_chats");
@@ -274,6 +312,9 @@ public final class RegistrarApp {
         List<String> selected = List.of(permissions.split(","));
         globalWrite.setSelected(selected.contains("global_write"));
         regionalWrite.setSelected(selected.contains("regional_write"));
+        ceo.setSelected(selected.contains("ceo"));
+        departmentLead.setSelected(selected.contains("department_lead"));
+        supportAgent.setSelected(selected.contains("support_agent"));
         hiddenData.setSelected(selected.contains("hidden_data"));
         manageUsers.setSelected(selected.contains("manage_users"));
         manageChats.setSelected(selected.contains("manage_chats"));
@@ -354,7 +395,7 @@ public final class RegistrarApp {
 
         @Override
         public String getColumnName(int column) {
-            return new String[]{"ФИО", "Профессия", "Место работы", "Регион"}[column];
+            return new String[]{"ФИО", "Профессия", "Отдел", "Регион"}[column];
         }
 
         @Override
