@@ -2,6 +2,9 @@ package kz.zacklayr.tlschat;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsParameters;
+import com.sun.net.httpserver.HttpsServer;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -11,6 +14,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import javax.net.ssl.SSLContext;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
@@ -24,7 +28,7 @@ public final class ChatServer implements AutoCloseable {
         repository = new ChatRepository(databaseUrl == null || databaseUrl.isBlank()
                 ? "jdbc:sqlite:" + database.toAbsolutePath()
                 : databaseUrl);
-        server = HttpServer.create(new InetSocketAddress(port), 0);
+        server = createServer(port);
         server.createContext("/api/registration", this::handleRegistration);
         server.createContext("/api/login", this::handleLogin);
         server.createContext("/api/registrar", this::handleRegistrar);
@@ -33,6 +37,32 @@ public final class ChatServer implements AutoCloseable {
         server.createContext("/api/users", this::handleUsers);
         server.createContext("/", this::handlePage);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    private HttpServer createServer(int port) throws IOException {
+        String keyStore = System.getenv("TLS_KEYSTORE");
+        String keyStorePassword = System.getenv("TLS_PASSWORD");
+        if (keyStore == null || keyStore.isBlank()) {
+            return HttpServer.create(new InetSocketAddress(port), 0);
+        }
+        if (keyStorePassword == null || keyStorePassword.isBlank()) {
+            throw new IllegalStateException("TLS_PASSWORD is required when TLS_KEYSTORE is configured");
+        }
+        try {
+            SSLContext sslContext = SslContextFactory.serverContext(
+                    Path.of(keyStore), keyStorePassword.toCharArray());
+            HttpsServer httpsServer = HttpsServer.create(new InetSocketAddress(port), 0);
+            httpsServer.setHttpsConfigurator(new HttpsConfigurator(sslContext) {
+                @Override
+                public void configure(HttpsParameters parameters) {
+                    parameters.setProtocols(new String[]{"TLSv1.3", "TLSv1.2"});
+                    parameters.setNeedClientAuth(false);
+                }
+            });
+            return httpsServer;
+        } catch (java.security.GeneralSecurityException e) {
+            throw new IllegalStateException("Could not initialize TLS server", e);
+        }
     }
 
     private ChatRepository.UserAccount authenticatedUser(HttpExchange exchange) throws SQLException {

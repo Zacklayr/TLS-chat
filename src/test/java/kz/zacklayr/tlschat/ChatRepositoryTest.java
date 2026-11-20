@@ -62,6 +62,19 @@ class ChatRepositoryTest {
     }
 
     @Test
+    void registrarCannotAssignCeoPermission() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration application = repository.registerApplication(
+                    "CEO Example", "Director", "Avengers", "Almaty", "+77001234567");
+            assertThrows(IllegalArgumentException.class,
+                    () -> repository.decideRegistration(application.id(), "APPROVED", "CEO Example",
+                            "Director", "Avengers", "Almaty", "+77001234567",
+                            "ceo", "ceo_user", "1111"));
+        }
+    }
+
+    @Test
     void assignsChatByDepartmentRule() throws Exception {
         database = Files.createTempFile("tls-chat-test-", ".db");
         try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
@@ -89,7 +102,8 @@ class ChatRepositoryTest {
                     "Chief Executive", "Гендиректор", "Высшее руководство", "Алматы", "+77000000001");
             repository.decideRegistration(ceoApplication.id(), "APPROVED", "Chief Executive",
                     "Гендиректор", "Высшее руководство", "Алматы", "+77000000001",
-                    "ceo", "ceo", "secure-pass");
+                    "", "ceo", "secure-pass");
+            repository.setUserPermissions("ceo", "ceo");
             ChatRepository.Registration employeeApplication = repository.registerApplication(
                     "Employee", "Разработчик", "Разработка движка", "Алматы", "+77000000002");
             repository.decideRegistration(employeeApplication.id(), "APPROVED", "Employee",

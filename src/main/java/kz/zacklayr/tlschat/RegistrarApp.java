@@ -63,7 +63,6 @@ public final class RegistrarApp {
     private JPasswordField accountPassword;
     private JCheckBox globalWrite;
     private JCheckBox regionalWrite;
-    private JCheckBox ceo;
     private JCheckBox departmentLead;
     private JCheckBox supportAgent;
     private JCheckBox hiddenData;
@@ -146,7 +145,6 @@ public final class RegistrarApp {
         details.add(accountPassword);
         globalWrite = permission("Писать в глобальный чат", details);
         regionalWrite = permission("Писать в региональные чаты", details);
-        ceo = permission("Гендиректор: писать всем и открывать личные чаты", details);
         departmentLead = permission("Руководитель отдела", details);
         supportAgent = permission("Оператор техподдержки", details);
         hiddenData = permission("Просматривать скрытые данные", details);
@@ -299,7 +297,6 @@ public final class RegistrarApp {
         List<String> selected = new ArrayList<>();
         if (globalWrite.isSelected()) selected.add("global_write");
         if (regionalWrite.isSelected()) selected.add("regional_write");
-        if (ceo.isSelected()) selected.add("ceo");
         if (departmentLead.isSelected()) selected.add("department_lead");
         if (supportAgent.isSelected()) selected.add("support_agent");
         if (hiddenData.isSelected()) selected.add("hidden_data");
@@ -312,7 +309,6 @@ public final class RegistrarApp {
         List<String> selected = List.of(permissions.split(","));
         globalWrite.setSelected(selected.contains("global_write"));
         regionalWrite.setSelected(selected.contains("regional_write"));
-        ceo.setSelected(selected.contains("ceo"));
         departmentLead.setSelected(selected.contains("department_lead"));
         supportAgent.setSelected(selected.contains("support_agent"));
         hiddenData.setSelected(selected.contains("hidden_data"));

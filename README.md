@@ -88,6 +88,25 @@ powershell -ExecutionPolicy Bypass -File .\start-server.ps1
 
 Для Heroku проект содержит `Procfile` и `system.properties`. Сервер использует порт из переменной `PORT`, которую Heroku задаёт автоматически. Если Heroku задаёт `DATABASE_URL`, приложение использует PostgreSQL; без неё локально используется SQLite. Поэтому перед рабочим запуском нужно добавить Heroku Postgres и не хранить production-данные в SQLite.
 
+### Локальная TLS-защита
+
+Для HTTPS-сервера создайте PKCS12-сертификат:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\create-tls-keystore.ps1 localhost
+```
+
+Задайте переменные среды перед запуском сервера:
+
+```powershell
+$env:TLS_KEYSTORE=(Resolve-Path ".\tls\tls-chat.p12").Path
+$env:TLS_PASSWORD="change-me-to-a-long-random-password"
+java -cp "target\classes;target\dependency\*" kz.zacklayr.tlschat.ChatServer
+```
+
+Сервер включит TLSv1.3/TLSv1.2 и будет доступен через `https://localhost:8080`.
+На Heroku сертификат не нужен: TLS завершается на платформе, а Java-приложение принимает HTTP-трафик внутри сети платформы.
+
 ### Панель регистратора
 
 Заявка на регистрацию содержит ФИО, профессию, место работы, регион и номер телефона. До одобрения регистратора заявка хранится отдельно от пользователей со статусом `PENDING` и не считается учётной записью. После одобрения регистратор создаёт логин и временный пароль; пароль хранится как PBKDF2-хэш с отдельной солью. Профессия и место работы назначаются как видимые атрибуты, а разрешения `global_write`, `regional_write`, `hidden_data`, `manage_users` и `manage_chats` хранятся отдельно как скрытые права.

@@ -459,6 +459,10 @@ public final class ChatRepository implements AutoCloseable {
             throw new IllegalArgumentException("Status must be APPROVED or REJECTED");
         }
         String normalizedPermissions = normalizePermissions(permissions);
+        if ("APPROVED".equals(status) && normalizedPermissions.split(",").length > 0
+                && List.of(normalizedPermissions.split(",")).contains("ceo")) {
+            throw new IllegalArgumentException("Право CEO назначает только администратор");
+        }
         Registration request = findRequest(requestId);
         if ("APPROVED".equals(status)) {
             if (username == null || !username.matches("[a-zA-Z0-9_]{3,32}")
@@ -646,6 +650,21 @@ public final class ChatRepository implements AutoCloseable {
             }
         }
         return users;
+    }
+
+    public synchronized void setUserPermissions(String username, String permissions) throws SQLException {
+        if (username == null || username.isBlank()) {
+            throw new IllegalArgumentException("Укажите логин пользователя");
+        }
+        String normalizedPermissions = normalizePermissions(permissions);
+        try (PreparedStatement statement = conn().prepareStatement(
+                "UPDATE users SET permissions = ? WHERE username = ? AND status = 'APPROVED'")) {
+            statement.setString(1, normalizedPermissions);
+            statement.setString(2, username.toLowerCase(Locale.ROOT));
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalArgumentException("Одобренный пользователь не найден");
+            }
+        }
     }
 
     public synchronized ChatDefinition ensureDirectChat(UserAccount owner, String targetUsername)
