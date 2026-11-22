@@ -227,10 +227,15 @@ public final class ChatServer implements AutoCloseable {
             }
             if ("/api/admin/chats".equals(path) && "POST".equals(exchange.getRequestMethod())) {
                 String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                String regionRule = "";
+                try {
+                    regionRule = jsonValue(body, "regionRule");
+                } catch (IllegalArgumentException ignored) {
+                }
                 ChatRepository.ChatDefinition chat = repository.createChat(
                         jsonValue(body, "id"), jsonValue(body, "type"), jsonValue(body, "name"),
                         jsonValue(body, "color"), jsonValue(body, "professionRule"),
-                        jsonValue(body, "workplaceRule"), jsonValue(body, "writePermissions"));
+                        jsonValue(body, "workplaceRule"), regionRule, jsonValue(body, "writePermissions"));
                 writeJson(exchange, 201, chatJson(chat));
                 return;
             }
@@ -279,8 +284,23 @@ public final class ChatServer implements AutoCloseable {
             } else if ("POST".equals(exchange.getRequestMethod()) && parts.length == 5 && "messages".equals(parts[4])) {
                 String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
                 String text = jsonValue(body, "text");
-                Message message = repository.addMessage(parts[3], account.username(), account.permissions(), text);
+                String chatId = parts[3];
+                Message message = repository.addMessage(chatId, account.username(), account.permissions(), text);
                 writeJson(exchange, 201, messageJson(message));
+                if ("marsel-cat".equals(chatId)) {
+                    String[] catQuotes = {
+                        "Мурр! Марсель передает вам порцию тепла 🐾 Баги исправятся, дедлайны подождут, а нервы надо беречь!",
+                        "Мяу! Сделай перерыв на 5 минут и выпей чай 🍵. Уровень стресса в Avengers Games снижен на 100%!",
+                        "Марсель сладко спит на клавиатуре 🐱 [Фото: спящий пушистый Марсель]. Всё идет по плану!",
+                        "Муррр... Марсель лично проверил ваш код и одобрил ✨ Продолжайте в том же духе!"
+                    };
+                    String reply = catQuotes[(int) (Math.random() * catQuotes.length)];
+                    repository.addMessage("marsel-cat", "Марсель 🐾", "", reply);
+                } else if ("helpdesk".equals(chatId) && !account.permissions().contains("support_agent")) {
+                    String autoReply = "🤖 Бот техподдержки: Ваше обращение принято. Специалист отдела техподдержки скоро подключится!";
+                    repository.addMessage("helpdesk", "AI Helpdesk Bot", "", autoReply);
+                }
+                return;
             } else {
                 writeJson(exchange, 404, "{\"error\":\"Not found\"}");
             }
@@ -344,7 +364,8 @@ public final class ChatServer implements AutoCloseable {
         return "[" + chats.stream().map(chat -> "{\"id\":\"" + escape(chat.id()) + "\",\"type\":\"" +
                 escape(chat.type()) + "\",\"name\":\"" + escape(chat.name()) + "\",\"color\":\"" +
                 escape(chat.color()) + "\",\"members\":" + chat.members() + ",\"online\":" +
-                chat.online() + ",\"unread\":0,\"pinned\":" + ("general".equals(chat.id()) || "dev".equals(chat.id())) +
+                chat.online() + ",\"unread\":0,\"pinned\":" + ("general".equals(chat.id()) || "leaders".equals(chat.id()) || "gamedev-all".equals(chat.id())) +
+                ",\"canWrite\":" + chat.canWrite() +
                 "}").collect(java.util.stream.Collectors.joining(",")) + "]";
     }
 
@@ -378,8 +399,8 @@ public final class ChatServer implements AutoCloseable {
         return "{\"id\":\"" + escape(chat.id()) + "\",\"type\":\"" + escape(chat.type()) +
                 "\",\"name\":\"" + escape(chat.name()) + "\",\"color\":\"" + escape(chat.color()) +
                 "\",\"professionRule\":\"" + escape(chat.professionRule()) + "\",\"workplaceRule\":\"" +
-                escape(chat.workplaceRule()) + "\",\"writePermissions\":\"" +
-                escape(chat.writePermissions()) + "\"}";
+                escape(chat.workplaceRule()) + "\",\"regionRule\":\"" + escape(chat.regionRule()) +
+                "\",\"writePermissions\":\"" + escape(chat.writePermissions()) + "\"}";
     }
 
     private static String adminChatsJson(List<ChatRepository.ChatDefinition> chats) {

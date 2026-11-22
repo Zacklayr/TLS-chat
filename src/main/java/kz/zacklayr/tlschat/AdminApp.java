@@ -33,6 +33,7 @@ public final class AdminApp {
     private JTextField color;
     private JTextField professionRule;
     private JTextField workplaceRule;
+    private JTextField regionRule;
     private JTextField writePermissions;
 
     private AdminApp(String defaultServerUrl) {
@@ -92,6 +93,7 @@ public final class AdminApp {
         color = field(form, "Цвет:");
         professionRule = field(form, "Профессия (пусто - все):");
         workplaceRule = field(form, "Отдел (пусто - все):");
+        regionRule = field(form, "Регион (пусто - все):");
         writePermissions = field(form, "Права записи (через запятую):");
         JButton create = new JButton("Создать чат");
         JButton refresh = new JButton("Обновить");
@@ -128,6 +130,7 @@ public final class AdminApp {
                 "\",\"name\":\"" + escape(name.getText()) + "\",\"color\":\"" + escape(color.getText()) +
                 "\",\"professionRule\":\"" + escape(professionRule.getText()) +
                 "\",\"workplaceRule\":\"" + escape(workplaceRule.getText()) +
+                "\",\"regionRule\":\"" + escape(regionRule.getText()) +
                 "\",\"writePermissions\":\"" + escape(writePermissions.getText()) + "\"}";
         try {
             request("POST", "/api/admin/chats", body);
@@ -196,9 +199,14 @@ public final class AdminApp {
             int end = json.indexOf('}', start);
             if (end < 0) break;
             String object = json.substring(start, end + 1);
+            String regRule = "";
+            try {
+                regRule = jsonValue(object, "regionRule");
+            } catch (Exception ignored) {
+            }
             result.add(new ChatDefinition(jsonValue(object, "id"), jsonValue(object, "type"),
                     jsonValue(object, "name"), jsonValue(object, "professionRule"),
-                    jsonValue(object, "workplaceRule"), jsonValue(object, "writePermissions")));
+                    jsonValue(object, "workplaceRule"), regRule, jsonValue(object, "writePermissions")));
             start = end + 1;
         }
         return result;
@@ -233,7 +241,7 @@ public final class AdminApp {
     }
 
     private record ChatDefinition(String id, String type, String name, String professionRule,
-                                  String workplaceRule, String writePermissions) {
+                                  String workplaceRule, String regionRule, String writePermissions) {
     }
 
     private static final class ChatTableModel extends AbstractTableModel {
@@ -249,17 +257,17 @@ public final class AdminApp {
         }
 
         public int getColumnCount() {
-            return 6;
+            return 7;
         }
 
         public String getColumnName(int column) {
-            return new String[]{"ID", "Тип", "Название", "Профессия", "Отдел", "Права записи"}[column];
+            return new String[]{"ID", "Тип", "Название", "Профессия", "Отдел", "Регион", "Права записи"}[column];
         }
 
         public Object getValueAt(int row, int column) {
             ChatDefinition chat = chats.get(row);
             return new String[]{chat.id(), chat.type(), chat.name(), chat.professionRule(),
-                    chat.workplaceRule(), chat.writePermissions()}[column];
+                    chat.workplaceRule(), chat.regionRule(), chat.writePermissions()}[column];
         }
     }
 }

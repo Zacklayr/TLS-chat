@@ -25,6 +25,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 public final class RegistrarApp {
 
@@ -214,6 +215,15 @@ public final class RegistrarApp {
         accountUsername.setText("");
         accountPassword.setText("");
         setPermissions(request.permissions());
+        String prof = request.profession().toLowerCase(Locale.ROOT);
+        String wp = request.workplace();
+        if ("Высшее руководство".equals(wp) || prof.contains("директор") || prof.contains("руководитель") || prof.contains("зам")) {
+            globalWrite.setSelected(true);
+            departmentLead.setSelected(true);
+        }
+        if ("Техподдержка".equals(wp) || prof.contains("поддержк")) {
+            supportAgent.setSelected(true);
+        }
     }
 
     private void decideSelected(String status) {

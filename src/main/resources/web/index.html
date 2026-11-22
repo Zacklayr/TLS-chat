@@ -429,6 +429,17 @@
       ? `${c.members} участников, ${c.online} в сети`
       : (c.online ? "в сети" : "был(а) недавно");
 
+    const canWrite = c.canWrite !== false;
+    $("input").disabled = !canWrite;
+    $("send").disabled = !canWrite;
+    if (!canWrite) {
+      $("input").placeholder = "🔒 Только чтение (сообщения от руководства)";
+      $("typing").textContent = "Писать в этот чат могут только генеральный директор и заместитель";
+    } else {
+      $("input").placeholder = "Сообщение… (Enter — отправить)";
+      $("typing").textContent = "";
+    }
+
     let html = "";
     let prev = null;
     c.msgs.forEach(m => {
@@ -474,13 +485,21 @@
       body: JSON.stringify({ sender: currentUser.username, text })
     });
     if (!response.ok) {
-      $("typing").textContent = "Ошибка отправки сообщения";
+      const err = await response.json().catch(() => ({}));
+      $("typing").textContent = err.error || "Ошибка отправки сообщения";
       return;
     }
     c.msgs.push(await response.json());
     $("input").value = "";
+    $("typing").textContent = "";
     renderChats();
     renderConv();
+    if (c.id === "marsel-cat" || c.id === "helpdesk") {
+      setTimeout(async () => {
+        await loadMessages(c);
+        renderConv();
+      }, 350);
+    }
   }
 
   $("chats").addEventListener("click", e => {

@@ -8,6 +8,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ChatRepositoryTest {
     private Path database;
@@ -54,7 +55,8 @@ class ChatRepositoryTest {
                     "Avengers", "Almaty", "+77001234567", "global_write", "alice", "1111");
             repository.assignChatsForUser("alice");
 
-            assertEquals(1, repository.findChatsForUser(repository.authenticate("alice", "1111")).size());
+            assertTrue(repository.findChatsForUser(repository.authenticate("alice", "1111"))
+                    .stream().anyMatch(c -> "developers".equals(c.id())));
             repository.addMessage("developers", "alice", "global_write", "Hello");
             assertThrows(IllegalArgumentException.class,
                     () -> repository.addMessage("developers", "alice", "", "Denied"));
@@ -90,7 +92,99 @@ class ChatRepositoryTest {
             repository.assignChatsForUser("kanat");
 
             var chats = repository.findChatsForUser(repository.authenticate("kanat", "pass123"));
-            assertEquals(2, chats.size());
+            assertTrue(chats.stream().anyMatch(c -> "support".equals(c.id())));
+            assertTrue(chats.stream().anyMatch(c -> "general".equals(c.id())));
+        }
+    }
+
+    @Test
+    void generalChatRestrictedToCeoAndDeputy() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            // Register regular developer
+            ChatRepository.Registration devApp = repository.registerApplication(
+                    "Bob Dev", "Программист", "Разработка движка", "Алматы", "+77001112233");
+            repository.decideRegistration(devApp.id(), "APPROVED", "Bob Dev", "Программист",
+                    "Разработка движка", "Алматы", "+77001112233", "", "bob", "pass123");
+            repository.assignChatsForUser("bob");
+
+            // Register deputy director with global_write
+            ChatRepository.Registration depApp = repository.registerApplication(
+                    "Sanjar Deputy", "Зам. гендиректора", "Высшее руководство", "Алматы", "+77002223344");
+            repository.decideRegistration(depApp.id(), "APPROVED", "Sanjar Deputy", "Зам. гендиректора",
+                    "Высшее руководство", "Алматы", "+77002223344", "global_write", "sanjar", "pass123");
+            repository.assignChatsForUser("sanjar");
+
+            // Register CEO
+            ChatRepository.Registration ceoApp = repository.registerApplication(
+                    "Erasyl CEO", "Гендиректор", "Высшее руководство", "Алматы", "+77003334455");
+            repository.decideRegistration(ceoApp.id(), "APPROVED", "Erasyl CEO", "Гендиректор",
+                    "Высшее руководство", "Алматы", "+77003334455", "", "erasyl", "pass123");
+            repository.setUserPermissions("erasyl", "ceo");
+            repository.assignChatsForUser("erasyl");
+
+            // Everyone has general chat
+            assertTrue(repository.findChatsForUser(repository.authenticate("bob", "pass123"))
+                    .stream().anyMatch(c -> "general".equals(c.id())));
+            assertTrue(repository.findChatsForUser(repository.authenticate("sanjar", "pass123"))
+                    .stream().anyMatch(c -> "general".equals(c.id())));
+            assertTrue(repository.findChatsForUser(repository.authenticate("erasyl", "pass123"))
+                    .stream().anyMatch(c -> "general".equals(c.id())));
+
+            // CEO and Deputy can post to general
+            repository.addMessage("general", "erasyl", "ceo", "Привет всем от гендиректора!");
+            repository.addMessage("general", "sanjar", "global_write", "Объявление от зам. гендиректора!");
+
+            // Regular employee cannot post to general
+            assertThrows(IllegalArgumentException.class,
+                    () -> repository.addMessage("general", "bob", "", "Попытка написать обычного сотрудника"));
+        }
+    }
+
+    @Test
+    void anonymousChatMasksSender() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration devApp = repository.registerApplication(
+                    "Secret Employee", "Тестировщик", "QA", "Талгар", "+77009998877");
+            repository.decideRegistration(devApp.id(), "APPROVED", "Secret Employee", "Тестировщик",
+                    "QA", "Талгар", "+77009998877", "", "secret_user", "pass123");
+            repository.assignChatsForUser("secret_user");
+
+            repository.addMessage("anonymous", "secret_user", "", "Здесь можно писать без правил");
+            var messages = repository.findMessages("anonymous", "secret_user");
+            assertEquals(1, messages.size());
+            assertEquals("Аноним", messages.get(0).sender());
+            assertEquals("Здесь можно писать без правил", messages.get(0).text());
+        }
+    }
+
+    @Test
+    void defaultChatsAutoAssignBasedOnDepartmentAndRegion() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration app = repository.registerApplication(
+                    "Talgar Engine Dev", "Инженер движка", "Разработка движка", "Талгар", "+77007776655");
+            repository.decideRegistration(app.id(), "APPROVED", "Talgar Engine Dev", "Инженер движка",
+                    "Разработка движка", "Талгар", "+77007776655", "", "talgar_dev", "pass123");
+            repository.assignChatsForUser("talgar_dev");
+
+            var userChats = repository.findChatsForUser(repository.authenticate("talgar_dev", "pass123"))
+                    .stream().map(ChatRepository.ChatSummary::id).toList();
+
+            // General, common gamedev, specific dept, local branch, and public channels
+            assertTrue(userChats.contains("general"));
+            assertTrue(userChats.contains("gamedev-all"));
+            assertTrue(userChats.contains("dept-engine"));
+            assertTrue(userChats.contains("region-talgar"));
+            assertTrue(userChats.contains("helpdesk"));
+            assertTrue(userChats.contains("anonymous"));
+            assertTrue(userChats.contains("marsel-cat"));
+
+            // Must NOT contain other departments or other regions
+            assertTrue(!userChats.contains("dept-art"));
+            assertTrue(!userChats.contains("region-almaty"));
+            assertTrue(!userChats.contains("region-astana"));
         }
     }
 

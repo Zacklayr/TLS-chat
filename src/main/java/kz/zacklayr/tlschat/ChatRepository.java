@@ -157,6 +157,7 @@ public final class ChatRepository implements AutoCloseable {
                     )
                     """);
         }
+        ensureDefaultChats();
     }
 
     private void ensureUserColumn(Statement statement, String name, String definition) throws SQLException {
@@ -247,9 +248,10 @@ public final class ChatRepository implements AutoCloseable {
             statement.setString(1, user.username());
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
+                    boolean writable = canWrite(result.getString("write_permissions"), user.permissions());
                     chats.add(new ChatSummary(result.getString("id"), result.getString("type"),
                             result.getString("name"), result.getString("color"), result.getInt("member_count"),
-                            result.getInt("online"), result.getInt("message_count")));
+                            result.getInt("online"), result.getInt("message_count"), writable));
                 }
             }
         }
@@ -259,28 +261,87 @@ public final class ChatRepository implements AutoCloseable {
     public synchronized ChatDefinition createChat(String id, String type, String name, String color,
                                                    String professionRule, String workplaceRule,
                                                    String writePermissions) throws SQLException {
+        return createChat(id, type, name, color, professionRule, workplaceRule, "", writePermissions);
+    }
+
+    public synchronized ChatDefinition createChat(String id, String type, String name, String color,
+                                                   String professionRule, String workplaceRule,
+                                                   String regionRule, String writePermissions) throws SQLException {
         if (id == null || !id.matches("[a-zA-Z0-9_-]{2,64}") || name == null || name.isBlank()
                 || type == null || type.isBlank() || color == null || color.isBlank()) {
             throw new IllegalArgumentException("Укажите id, тип, название и цвет чата");
         }
         String normalizedPermissions = normalizePermissions(writePermissions);
-        try (PreparedStatement statement = conn().prepareStatement(
-                "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
+        String sql = postgres
+                ? "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, name = EXCLUDED.name, " +
+                "color = EXCLUDED.color, profession_rule = EXCLUDED.profession_rule, workplace_rule = EXCLUDED.workplace_rule, " +
+                "region_rule = EXCLUDED.region_rule, write_permissions = EXCLUDED.write_permissions"
+                : "INSERT OR REPLACE INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        try (PreparedStatement statement = conn().prepareStatement(sql)) {
             statement.setString(1, id);
             statement.setString(2, type.trim());
             statement.setString(3, name.trim());
             statement.setString(4, color.trim());
             statement.setString(5, professionRule == null ? "" : professionRule.trim());
             statement.setString(6, workplaceRule == null ? "" : workplaceRule.trim());
-            statement.setString(7, "");
+            statement.setString(7, regionRule == null ? "" : regionRule.trim());
             statement.setString(8, normalizedPermissions);
             statement.executeUpdate();
         }
         assignUsersToChat(id);
         return new ChatDefinition(id, type.trim(), name.trim(), color.trim(),
                 professionRule == null ? "" : professionRule.trim(),
-                workplaceRule == null ? "" : workplaceRule.trim(), normalizedPermissions);
+                workplaceRule == null ? "" : workplaceRule.trim(),
+                regionRule == null ? "" : regionRule.trim(), normalizedPermissions);
+    }
+
+    private void ensureDefaultChats() throws SQLException {
+        insertDefaultChat("general", "group", "📢 Главный штаб (Avengers Games)", "c-blue", "", "", "", "global_write");
+        insertDefaultChat("gamedev-all", "group", "🎮 Разработка игр (All Devs)", "c-green", "",
+                "Разработка движка,Разработка интеграций и портирования,Геймдизайн,Арт и анимация,Нарратив и сценарий,Звук,Локализация и адаптация,QA,Управление проектами", "", "");
+        insertDefaultChat("leaders", "group", "⭐ Совет руководителей", "c-orange", "", "Высшее руководство", "", "");
+        insertDefaultChat("dept-engine", "group", "⚙️ Разработка движка", "c-purple", "", "Разработка движка", "", "");
+        insertDefaultChat("dept-integrations", "group", "🔌 Интеграции и портирование", "c-blue", "", "Разработка интеграций и портирования", "", "");
+        insertDefaultChat("dept-gamedesign", "group", "🎲 Геймдизайн", "c-green", "", "Геймдизайн", "", "");
+        insertDefaultChat("dept-art", "group", "🎨 Арт и анимация", "c-pink", "", "Арт и анимация", "", "");
+        insertDefaultChat("dept-narrative", "group", "📜 Нарратив и сценарий", "c-orange", "", "Нарратив и сценарий", "", "");
+        insertDefaultChat("dept-audio", "group", "🎧 Звук", "c-purple", "", "Звук", "", "");
+        insertDefaultChat("dept-localization", "group", "🌐 Локализация и адаптация", "c-blue", "", "Локализация и адаптация", "", "");
+        insertDefaultChat("dept-support", "group", "🛠️ Отдел техподдержки", "c-orange", "", "Техподдержка", "", "");
+        insertDefaultChat("dept-security", "group", "🛡️ Кибербезопасность", "c-green", "", "Кибербезопасность", "", "");
+        insertDefaultChat("dept-hardware", "group", "🖥️ Оборудование и закупки", "c-blue", "", "Оборудование и закупки", "", "");
+        insertDefaultChat("dept-qa", "group", "🎯 Отдел тестирования (QA)", "c-pink", "", "QA", "", "");
+        insertDefaultChat("dept-hr", "group", "👥 Отдел кадров (HR)", "c-green", "", "HR", "", "");
+        insertDefaultChat("dept-projects", "group", "📊 Управление проектами", "c-orange", "", "Управление проектами", "", "");
+        insertDefaultChat("helpdesk", "support", "🆘 Служба техподдержки", "c-orange", "", "", "", "");
+        insertDefaultChat("anonymous", "group", "🎭 Анонимный чат", "c-purple", "", "", "", "");
+        insertDefaultChat("marsel-cat", "direct", "🐱 Кот Марсель", "c-orange", "", "", "", "");
+        insertDefaultChat("region-almaty", "group", "🏙️ Филиал Алматы", "c-blue", "", "", "Алматы", "");
+        insertDefaultChat("region-astana", "group", "🏛️ Филиал Астана", "c-blue", "", "", "Астана", "");
+        insertDefaultChat("region-talgar", "group", "🏔️ Филиал Талгар", "c-green", "", "", "Талгар", "");
+    }
+
+    private void insertDefaultChat(String id, String type, String name, String color,
+                                   String professionRule, String workplaceRule,
+                                   String regionRule, String writePermissions) throws SQLException {
+        if (!chatExists(id)) {
+            try (PreparedStatement stmt = conn().prepareStatement(
+                    "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
+                stmt.setString(1, id);
+                stmt.setString(2, type);
+                stmt.setString(3, name);
+                stmt.setString(4, color);
+                stmt.setString(5, professionRule);
+                stmt.setString(6, workplaceRule);
+                stmt.setString(7, regionRule);
+                stmt.setString(8, writePermissions);
+                stmt.executeUpdate();
+            }
+        }
+        assignUsersToChat(id);
     }
 
     private void assignUsersToChat(String chatId) throws SQLException {
@@ -296,24 +357,53 @@ public final class ChatRepository implements AutoCloseable {
         }
     }
 
+    static boolean matchesRule(String rule, String userValue) {
+        if (rule == null || rule.isBlank()) {
+            return true;
+        }
+        if (userValue == null || userValue.isBlank()) {
+            return false;
+        }
+        String normalizedUser = userValue.trim().toLowerCase(Locale.ROOT);
+        for (String part : rule.split(",")) {
+            String trimmed = part.trim().toLowerCase(Locale.ROOT);
+            if (!trimmed.isEmpty() && trimmed.equals(normalizedUser)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public synchronized void assignChatsForUser(String username) throws SQLException {
         try (PreparedStatement user = conn().prepareStatement(
-                "SELECT profession, workplace, region FROM users WHERE username = ?")) {
+                "SELECT profession, workplace, region, permissions FROM users WHERE username = ?")) {
             user.setString(1, username);
             try (ResultSet userResult = user.executeQuery()) {
                 if (!userResult.next()) {
                     return;
                 }
-                try (PreparedStatement chats = conn().prepareStatement(
-                        "SELECT id FROM chats WHERE (profession_rule = '' OR profession_rule = ?) " +
-                                "AND (workplace_rule = '' OR workplace_rule = ?) " +
-                                "AND (region_rule = '' OR region_rule = ?)")) {
-                    chats.setString(1, userResult.getString("profession"));
-                    chats.setString(2, userResult.getString("workplace"));
-                    chats.setString(3, userResult.getString("region"));
-                    try (ResultSet chatResult = chats.executeQuery()) {
-                        while (chatResult.next()) {
-                            insertMembership(chatResult.getString("id"), username);
+                String userProf = userResult.getString("profession");
+                String userWork = userResult.getString("workplace");
+                String userReg = userResult.getString("region");
+                String userPerms = userResult.getString("permissions");
+                Set<String> permsSet = (userPerms == null || userPerms.isBlank())
+                        ? Set.of()
+                        : Set.of(userPerms.split(","));
+
+                try (Statement stmt = conn().createStatement();
+                     ResultSet chatResult = stmt.executeQuery(
+                             "SELECT id, profession_rule, workplace_rule, region_rule FROM chats")) {
+                    while (chatResult.next()) {
+                        String chatId = chatResult.getString("id");
+                        String profRule = chatResult.getString("profession_rule");
+                        String workRule = chatResult.getString("workplace_rule");
+                        String regRule = chatResult.getString("region_rule");
+
+                        boolean isLeaderChat = "leaders".equals(chatId);
+                        boolean matchesLeader = isLeaderChat && (permsSet.contains("ceo") || permsSet.contains("department_lead"));
+
+                        if (matchesLeader || (matchesRule(profRule, userProf) && matchesRule(workRule, userWork) && matchesRule(regRule, userReg))) {
+                            insertMembership(chatId, username);
                         }
                     }
                 }
@@ -363,12 +453,14 @@ public final class ChatRepository implements AutoCloseable {
             throw new IllegalArgumentException("Chat is not available");
         }
         List<Message> messages = new ArrayList<>();
+        boolean isAnonymous = "anonymous".equals(chatId);
         try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT sender, text, sent_at FROM messages WHERE chat_id = ? ORDER BY id")) {
             statement.setString(1, chatId);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
-                    messages.add(new Message(result.getString("sender"), result.getString("text"),
+                    String sender = isAnonymous ? "Аноним" : result.getString("sender");
+                    messages.add(new Message(sender, result.getString("text"),
                             Instant.parse(result.getString("sent_at"))));
                 }
             }
@@ -729,12 +821,21 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     public record ChatSummary(String id, String type, String name, String color,
-                              int members, int online, int messageCount) {
+                              int members, int online, int messageCount, boolean canWrite) {
+        public ChatSummary(String id, String type, String name, String color,
+                           int members, int online, int messageCount) {
+            this(id, type, name, color, members, online, messageCount, true);
+        }
     }
 
     public record ChatDefinition(String id, String type, String name, String color,
                                  String professionRule, String workplaceRule,
-                                 String writePermissions) {
+                                 String regionRule, String writePermissions) {
+        public ChatDefinition(String id, String type, String name, String color,
+                              String professionRule, String workplaceRule,
+                              String writePermissions) {
+            this(id, type, name, color, professionRule, workplaceRule, "", writePermissions);
+        }
     }
 
     public record Registration(String id, String fullName, String profession, String workplace,
