@@ -214,6 +214,58 @@ class ChatRepositoryTest {
         }
     }
 
+    @Test
+    void marksMessagesAsReadAndReturnsSeenByList() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration dev1 = repository.registerApplication(
+                    "Алиса", "Разработчик", "Разработка движка", "Алматы", "+77001110001");
+            repository.decideRegistration(dev1.id(), "APPROVED", "Алиса", "Разработчик",
+                    "Разработка движка", "Алматы", "+77001110001", "", "alisa", "pass1");
+            repository.assignChatsForUser("alisa");
+
+            ChatRepository.Registration dev2 = repository.registerApplication(
+                    "Боб", "Тестировщик", "Разработка движка", "Алматы", "+77001110002");
+            repository.decideRegistration(dev2.id(), "APPROVED", "Боб", "Тестировщик",
+                    "Разработка движка", "Алматы", "+77001110002", "", "bob_reader", "pass2");
+            repository.assignChatsForUser("bob_reader");
+
+            repository.addMessage("dept-engine", "alisa", "", "Коллеги, новый билд готов!");
+
+            // Before bob opens: bob hasn't seen it
+            var msgsBefore = repository.findMessages("dept-engine", "alisa");
+            assertEquals(1, msgsBefore.size());
+            assertEquals("Алиса", msgsBefore.get(0).senderName());
+            assertEquals("Разработчик", msgsBefore.get(0).senderRole());
+            assertTrue(msgsBefore.get(0).seenBy().stream().noneMatch(s -> s.contains("Боб")));
+
+            // Bob opens the chat
+            var msgsBob = repository.findMessages("dept-engine", "bob_reader");
+            assertEquals(1, msgsBob.size());
+            assertTrue(msgsBob.get(0).seenBy().stream().anyMatch(s -> s.contains("Боб")));
+
+            // When Alice checks again, she sees that Bob read it
+            var msgsAliceAgain = repository.findMessages("dept-engine", "alisa");
+            assertTrue(msgsAliceAgain.get(0).seenBy().stream().anyMatch(s -> s.contains("Боб")));
+        }
+    }
+
+    @Test
+    void allowsBotsToPostMessagesWithoutChatMembership() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            // Marsel bot in marsel-cat chat
+            Message m1 = repository.addMessage("marsel-cat", "Марсель 🐾", "", "Мяу! 🐾");
+            assertEquals("Марсель 🐾", m1.sender());
+            assertEquals("Мяу! 🐾", m1.text());
+
+            // AI Helpdesk Bot in helpdesk chat
+            Message m2 = repository.addMessage("helpdesk", "AI Helpdesk Bot", "", "Обращение принято");
+            assertEquals("AI Helpdesk Bot", m2.sender());
+            assertEquals("Обращение принято", m2.text());
+        }
+    }
+
     @AfterEach
     void removeDatabase() throws Exception {
         if (database != null) {

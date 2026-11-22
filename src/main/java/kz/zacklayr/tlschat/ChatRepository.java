@@ -14,10 +14,12 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 public final class ChatRepository implements AutoCloseable {
@@ -154,6 +156,14 @@ public final class ChatRepository implements AutoCloseable {
                         username TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
                         expires_at TEXT NOT NULL
+                    )
+                    """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS message_reads (
+                        message_id BIGINT NOT NULL,
+                        username TEXT NOT NULL,
+                        read_at TEXT NOT NULL,
+                        PRIMARY KEY (message_id, username)
                     )
                     """);
         }
@@ -452,16 +462,76 @@ public final class ChatRepository implements AutoCloseable {
         if (!chatExists(chatId) || !isMember(chatId, username)) {
             throw new IllegalArgumentException("Chat is not available");
         }
-        List<Message> messages = new ArrayList<>();
         boolean isAnonymous = "anonymous".equals(chatId);
+        // Mark existing messages as read by this user
+        if (username != null && !username.isBlank() && !isAnonymous) {
+            String insertReadsSql = postgres
+                    ? "INSERT INTO message_reads(message_id, username, read_at) " +
+                      "SELECT id, ?, ? FROM messages WHERE chat_id = ? " +
+                      "ON CONFLICT DO NOTHING"
+                    : "INSERT OR IGNORE INTO message_reads(message_id, username, read_at) " +
+                      "SELECT id, ?, ? FROM messages WHERE chat_id = ?";
+            try (PreparedStatement readStmt = conn().prepareStatement(insertReadsSql)) {
+                readStmt.setString(1, username);
+                readStmt.setString(2, Instant.now().toString());
+                readStmt.setString(3, chatId);
+                readStmt.executeUpdate();
+            }
+        }
+
+        // Build mapping of message_id -> seenBy readers
+        Map<Long, List<String>> readsMap = new HashMap<>();
+        if (!isAnonymous) {
+            try (PreparedStatement stmt = conn().prepareStatement(
+                    "SELECT mr.message_id, mr.username, COALESCE(u.display_name, mr.username) AS reader_name, " +
+                            "COALESCE(u.profession, '') AS reader_role " +
+                            "FROM message_reads mr " +
+                            "JOIN messages m ON m.id = mr.message_id " +
+                            "LEFT JOIN users u ON u.username = mr.username " +
+                            "WHERE m.chat_id = ? " +
+                            "ORDER BY mr.read_at")) {
+                stmt.setString(1, chatId);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        long msgId = rs.getLong("message_id");
+                        String rName = rs.getString("reader_name");
+                        String rRole = rs.getString("reader_role");
+                        String label = rRole.isBlank() ? rName : rName + " (" + rRole + ")";
+                        readsMap.computeIfAbsent(msgId, k -> new ArrayList<>()).add(label);
+                    }
+                }
+            }
+        }
+
+        List<Message> messages = new ArrayList<>();
         try (PreparedStatement statement = conn().prepareStatement(
-                "SELECT sender, text, sent_at FROM messages WHERE chat_id = ? ORDER BY id")) {
+                "SELECT m.id, m.sender, m.text, m.sent_at, " +
+                        "COALESCE(u.display_name, m.sender) AS display_name, " +
+                        "COALESCE(u.profession, '') AS profession " +
+                        "FROM messages m " +
+                        "LEFT JOIN users u ON u.username = m.sender " +
+                        "WHERE m.chat_id = ? ORDER BY m.id")) {
             statement.setString(1, chatId);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
-                    String sender = isAnonymous ? "Аноним" : result.getString("sender");
-                    messages.add(new Message(sender, result.getString("text"),
-                            Instant.parse(result.getString("sent_at"))));
+                    long id = result.getLong("id");
+                    String sender = result.getString("sender");
+                    String displayName = result.getString("display_name");
+                    String role = result.getString("profession");
+                    if (isAnonymous) {
+                        sender = "Аноним";
+                        displayName = "Аноним";
+                        role = "Сотрудник";
+                    } else if ("Марсель 🐾".equals(sender)) {
+                        displayName = "Марсель 🐾";
+                        role = "Главный по спокойствию";
+                    } else if ("AI Helpdesk Bot".equals(sender)) {
+                        displayName = "Бот техподдержки 🤖";
+                        role = "Автоматическая служба помощи";
+                    }
+                    List<String> seenBy = readsMap.getOrDefault(id, List.of());
+                    messages.add(new Message(id, sender, displayName, role, result.getString("text"),
+                            Instant.parse(result.getString("sent_at")), seenBy));
                 }
             }
         }
@@ -470,7 +540,9 @@ public final class ChatRepository implements AutoCloseable {
 
     public synchronized Message addMessage(String chatId, String sender, String permissions, String text)
             throws SQLException {
-        if (!chatExists(chatId) || !isMember(chatId, sender)) {
+        boolean isSystemSender = "Марсель 🐾".equals(sender) || "AI Helpdesk Bot".equals(sender)
+                || "Бот техподдержки".equals(sender) || "Система".equals(sender);
+        if (!chatExists(chatId) || (!isSystemSender && !isMember(chatId, sender))) {
             throw new IllegalArgumentException("Chat is not available");
         }
         if (sender == null || sender.isBlank() || text == null || text.isBlank() || text.length() > 4000) {
@@ -486,15 +558,36 @@ public final class ChatRepository implements AutoCloseable {
             }
         }
         Instant sentAt = Instant.now();
+        long generatedId = 0;
         try (PreparedStatement statement = conn().prepareStatement(
-                "INSERT INTO messages(chat_id, sender, text, sent_at) VALUES (?, ?, ?, ?)")) {
+                "INSERT INTO messages(chat_id, sender, text, sent_at) VALUES (?, ?, ?, ?)",
+                Statement.RETURN_GENERATED_KEYS)) {
             statement.setString(1, chatId);
             statement.setString(2, sender);
             statement.setString(3, text);
             statement.setString(4, sentAt.toString());
             statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                if (keys.next()) {
+                    generatedId = keys.getLong(1);
+                }
+            }
         }
-        return new Message(sender, text, sentAt);
+        String displayName = sender;
+        String role = "";
+        if ("Марсель 🐾".equals(sender)) {
+            role = "Главный по спокойствию";
+        } else if ("AI Helpdesk Bot".equals(sender)) {
+            displayName = "Бот техподдержки 🤖";
+            role = "Автоматическая служба помощи";
+        } else {
+            UserAccount account = findApprovedUser(sender);
+            if (account != null) {
+                displayName = account.displayName();
+                role = account.profession();
+            }
+        }
+        return new Message(generatedId, sender, displayName, role, text, sentAt, List.of());
     }
 
     public synchronized Registration registerApplication(String fullName, String profession,

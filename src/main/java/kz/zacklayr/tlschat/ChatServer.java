@@ -12,13 +12,16 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import javax.net.ssl.SSLContext;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 
 public final class ChatServer implements AutoCloseable {
     private final HttpServer server;
@@ -35,6 +38,7 @@ public final class ChatServer implements AutoCloseable {
         server.createContext("/api/admin", this::handleAdmin);
         server.createContext("/api/chats", this::handleChats);
         server.createContext("/api/users", this::handleUsers);
+        server.createContext("/photos", this::handlePhotos);
         server.createContext("/", this::handlePage);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
@@ -288,16 +292,34 @@ public final class ChatServer implements AutoCloseable {
                 Message message = repository.addMessage(chatId, account.username(), account.permissions(), text);
                 writeJson(exchange, 201, messageJson(message));
                 if ("marsel-cat".equals(chatId)) {
-                    String[] catQuotes = {
-                        "Мурр! Марсель передает вам порцию тепла 🐾 Баги исправятся, дедлайны подождут, а нервы надо беречь!",
-                        "Мяу! Сделай перерыв на 5 минут и выпей чай 🍵. Уровень стресса в Avengers Games снижен на 100%!",
-                        "Марсель сладко спит на клавиатуре 🐱 [Фото: спящий пушистый Марсель]. Всё идет по плану!",
-                        "Муррр... Марсель лично проверил ваш код и одобрил ✨ Продолжайте в том же духе!"
+                    Path marselDir = Path.of("photos", "marsel");
+                    List<Path> photoList = List.of();
+                    if (Files.exists(marselDir)) {
+                        try (var stream = Files.list(marselDir)) {
+                            photoList = stream.filter(p -> {
+                                String s = p.getFileName().toString().toLowerCase(Locale.ROOT);
+                                return s.endsWith(".jpg") || s.endsWith(".jpeg") || s.endsWith(".png")
+                                        || s.endsWith(".webp") || s.endsWith(".gif");
+                            }).toList();
+                        } catch (IOException ignored) {
+                        }
+                    }
+                    String[] meows = {
+                        "Мяу! 🐾 Муррр-муррр... Марсель сладко потёрся о ваши руки и пожелал удачи!",
+                        "Мурр! Сделай паузу на 5 минут и попей чай 🍵. Спокойствие сотрудников — закон Avengers Games!",
+                        "Мяу-мяу! 🐱 Марсель лично проверил ваш код и одобрил ✨ Уровень стресса снижен до 0%!",
+                        "Муррр... Марсель сладко спит на клавиатуре и передаёт вам тепло и уют 🐾"
                     };
-                    String reply = catQuotes[(int) (Math.random() * catQuotes.length)];
-                    repository.addMessage("marsel-cat", "Марсель 🐾", "", reply);
+                    String meow = meows[(int) (Math.random() * meows.length)];
+                    if (!photoList.isEmpty()) {
+                        Path chosen = photoList.get((int) (Math.random() * photoList.size()));
+                        String photoUrl = "/photos/marsel/" + chosen.getFileName().toString();
+                        meow += "\n[photo:" + photoUrl + "]";
+                    }
+                    repository.addMessage("marsel-cat", "Марсель 🐾", "", meow);
                 } else if ("helpdesk".equals(chatId) && !account.permissions().contains("support_agent")) {
-                    String autoReply = "🤖 Бот техподдержки: Ваше обращение принято. Специалист отдела техподдержки скоро подключится!";
+                    String autoReply = "🤖 Бот техподдержки: Здравствуйте, " + account.displayName() +
+                            "! Ваше обращение принято: «" + text + "». Дежурный специалист техподдержки уже видит ваш запрос и ответит вам здесь!";
                     repository.addMessage("helpdesk", "AI Helpdesk Bot", "", autoReply);
                 }
                 return;
@@ -360,6 +382,34 @@ public final class ChatServer implements AutoCloseable {
         }
     }
 
+    private void handlePhotos(HttpExchange exchange) throws IOException {
+        try {
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            String rawPath = URLDecoder.decode(exchange.getRequestURI().getPath(), StandardCharsets.UTF_8);
+            Path filePath = Path.of(rawPath.replaceFirst("^/", "")).normalize();
+            if (!filePath.startsWith("photos") || !Files.exists(filePath) || Files.isDirectory(filePath)) {
+                writeJson(exchange, 404, "{\"error\":\"Photo not found\"}");
+                return;
+            }
+            String fileName = filePath.getFileName().toString().toLowerCase(Locale.ROOT);
+            String mime = fileName.endsWith(".png") ? "image/png"
+                    : fileName.endsWith(".gif") ? "image/gif"
+                    : fileName.endsWith(".webp") ? "image/webp" : "image/jpeg";
+            byte[] bytes = Files.readAllBytes(filePath);
+            exchange.getResponseHeaders().set("Content-Type", mime);
+            exchange.getResponseHeaders().set("Cache-Control", "public, max-age=3600");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(bytes);
+            }
+        } finally {
+            exchange.close();
+        }
+    }
+
     private static String chatsJson(List<ChatRepository.ChatSummary> chats) {
         return "[" + chats.stream().map(chat -> "{\"id\":\"" + escape(chat.id()) + "\",\"type\":\"" +
                 escape(chat.type()) + "\",\"name\":\"" + escape(chat.name()) + "\",\"color\":\"" +
@@ -374,8 +424,16 @@ public final class ChatServer implements AutoCloseable {
     }
 
     private static String messageJson(Message message) {
-        return "{\"from\":\"" + escape(message.sender()) + "\",\"text\":\"" + escape(message.text()) +
-                "\",\"t\":\"" + message.sentAt().toString() + "\",\"out\":false}";
+        String seenByArray = message.seenBy() == null ? "[]" :
+                "[" + message.seenBy().stream().map(s -> "\"" + escape(s) + "\"").collect(Collectors.joining(",")) + "]";
+        return "{\"id\":" + message.id() +
+                ",\"from\":\"" + escape(message.sender()) +
+                "\",\"name\":\"" + escape(message.senderName()) +
+                "\",\"role\":\"" + escape(message.senderRole()) +
+                "\",\"text\":\"" + escape(message.text()) +
+                "\",\"t\":\"" + message.sentAt().toString() +
+                "\",\"out\":false" +
+                ",\"seenBy\":" + seenByArray + "}";
     }
 
     private static String registrationJson(ChatRepository.Registration registration) {
