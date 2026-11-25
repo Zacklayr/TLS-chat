@@ -49,6 +49,15 @@ services:
     depends_on:
       - backend
 
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - proxy
+
 volumes:
   postgres-data:
   uploads-data:

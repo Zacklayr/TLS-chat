@@ -443,6 +443,7 @@
   let callPollTimer = null;
   let incomingCallId = null;
   let realtimeSocket = null;
+  let typingTimer = null;
   let filter = "all";
   const $ = id => document.getElementById(id);
   const esc = s => s.replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -471,7 +472,7 @@
   }
 
   async function loadCeoUsers() {
-    if (!currentUser || !currentUser.permissions.split(",").includes("ceo")) return;
+    if (!currentUser) return;
     const response = await fetch("/api/users", { headers: authHeaders() });
     if (!response.ok) return;
     const users = await response.json();
@@ -528,6 +529,12 @@
           if (notification.id) fetch(`/api/notifications/${encodeURIComponent(notification.id)}/read`, {
             method: "POST", headers: authHeaders()
           }).catch(() => {});
+          return;
+        }
+        if (packet.type === "typing" && packet.chatId === current) {
+          $("typing").textContent = packet.active ? `${packet.name} печатает…` : "";
+          clearTimeout(typingTimer);
+          if (packet.active) typingTimer = setTimeout(() => { $("typing").textContent = ""; }, 2500);
           return;
         }
         if (packet.type !== "message" || !packet.chatId || !packet.message) return;
@@ -828,6 +835,10 @@
     renderChats();
   }));
   $("search").addEventListener("input", renderChats);
+  $("input").addEventListener("input", () => {
+    if (!current || !realtimeSocket || realtimeSocket.readyState !== WebSocket.OPEN) return;
+    realtimeSocket.send(JSON.stringify({ type: "typing", chatId: current, active: Boolean($("input").value) }));
+  });
   $("send").addEventListener("click", send);
   $("audioCall").addEventListener("click", () => startCall("audio"));
   $("videoCall").addEventListener("click", () => startCall("video"));

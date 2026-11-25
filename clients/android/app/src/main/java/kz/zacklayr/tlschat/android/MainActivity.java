@@ -48,6 +48,8 @@ public final class MainActivity extends Activity {
     private ListView chatList;
     private TextView messages;
     private ChatItem selectedChat;
+    private String activeCallId;
+    private String incomingCallId;
 
     @Override
     public void onCreate(Bundle state) {
@@ -107,6 +109,16 @@ public final class MainActivity extends Activity {
         callHistory.setText("Call history");
         Button scheduleCall = new Button(this);
         scheduleCall.setText("Schedule call");
+        Button audioCall = new Button(this);
+        audioCall.setText("Audio call");
+        Button videoCall = new Button(this);
+        videoCall.setText("Video call");
+        Button checkIncoming = new Button(this);
+        checkIncoming.setText("Check incoming");
+        Button acceptCall = new Button(this);
+        acceptCall.setText("Accept");
+        Button endCall = new Button(this);
+        endCall.setText("End call");
         LinearLayout composerRow = new LinearLayout(this);
         composerRow.addView(composer, new LinearLayout.LayoutParams(0, -2, 1));
         composerRow.addView(attach, new LinearLayout.LayoutParams(-2, -2));
@@ -117,6 +129,11 @@ public final class MainActivity extends Activity {
         root.addView(composerRow);
         root.addView(callHistory);
         root.addView(scheduleCall);
+        root.addView(audioCall);
+        root.addView(videoCall);
+        root.addView(checkIncoming);
+        root.addView(acceptCall);
+        root.addView(endCall);
         setContentView(root);
         chatList.setOnItemClickListener((parent, view, position, id) -> {
             selectedChat = chatItems.get(position);
@@ -126,6 +143,11 @@ public final class MainActivity extends Activity {
         attach.setOnClickListener(view -> chooseAttachment());
         callHistory.setOnClickListener(view -> loadCallHistory());
         scheduleCall.setOnClickListener(view -> scheduleCall());
+        audioCall.setOnClickListener(view -> startCall("audio"));
+        videoCall.setOnClickListener(view -> startCall("video"));
+        checkIncoming.setOnClickListener(view -> checkIncomingCalls());
+        acceptCall.setOnClickListener(view -> acceptIncomingCall());
+        endCall.setOnClickListener(view -> endActiveCall());
     }
 
     private void loadChats() {
@@ -310,6 +332,72 @@ public final class MainActivity extends Activity {
                 setStatus("Scheduling is available for direct chats only");
             }
         });
+    }
+
+    private void startCall(String mediaType) {
+        if (selectedChat == null) {
+            setStatus("Select a direct chat first");
+            return;
+        }
+        request("GET", "/api/chats/" + selectedChat.id + "/peer", null, peerResponse -> {
+            try {
+                String peer = new JSONObject(peerResponse).getString("username");
+                String body = "{\"chatId\":\"" + escape(selectedChat.id) + "\",\"username\":\""
+                        + escape(peer) + "\",\"mediaType\":\"" + escape(mediaType) + "\"}";
+                request("POST", "/api/calls", body, response -> {
+                    try {
+                        activeCallId = new JSONObject(response).getString("id");
+                        setStatus("Call ringing (" + mediaType + "); open WebRTC client for audio/video");
+                    } catch (Exception e) {
+                        setStatus(e.getMessage());
+                    }
+                });
+            } catch (Exception e) {
+                setStatus(e.getMessage());
+            }
+        });
+    }
+
+    private void checkIncomingCalls() {
+        request("GET", "/api/calls/incoming", null, response -> {
+            try {
+                JSONArray calls = new JSONArray(response);
+                if (calls.length() == 0) {
+                    setStatus("No incoming calls");
+                    return;
+                }
+                JSONObject call = calls.getJSONObject(0);
+                incomingCallId = call.getString("id");
+                setStatus("Incoming " + call.optString("mediaType") + " call; press Accept");
+            } catch (Exception e) {
+                setStatus(e.getMessage());
+            }
+        });
+    }
+
+    private void acceptIncomingCall() {
+        if (incomingCallId == null) {
+            setStatus("Check incoming calls first");
+            return;
+        }
+        request("POST", "/api/calls/" + incomingCallId + "/events",
+                "{\"type\":\"accept\",\"payload\":\"\"}", response -> {
+                    activeCallId = incomingCallId;
+                    incomingCallId = null;
+                    setStatus("Call accepted; open WebRTC client for audio/video");
+                });
+    }
+
+    private void endActiveCall() {
+        if (activeCallId == null) {
+            setStatus("No active call");
+            return;
+        }
+        request("POST", "/api/calls/" + activeCallId + "/events",
+                "{\"type\":\"end\",\"payload\":\"\"}", response -> {
+                    activeCallId = null;
+                    setStatus("Call ended");
+                });
     }
 
     private void setStatus(String text) {

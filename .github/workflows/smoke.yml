@@ -1,0 +1,20 @@
+name: TLS-Chat published smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: HTTPS URL of the deployed TLS-Chat instance
+        required: true
+        default: https://avengers-chat-8022390115f6.herokuapp.com
+        type: string
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Check deployed endpoints and security headers
+        shell: pwsh
+        run: ./infra/smoke-test.ps1 -BaseUrl "${{ inputs.base_url }}"

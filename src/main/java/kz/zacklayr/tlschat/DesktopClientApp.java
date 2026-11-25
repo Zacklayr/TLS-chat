@@ -44,6 +44,8 @@ public final class DesktopClientApp {
     private JTextField composer;
     private JLabel status;
     private Timer refreshTimer;
+    private String activeCallId;
+    private String incomingCallId;
 
     private DesktopClientApp(String defaultServerUrl) {
         this.defaultServerUrl = defaultServerUrl;
@@ -110,20 +112,32 @@ public final class DesktopClientApp {
         JButton attach = new JButton("Attach");
         JButton callHistory = new JButton("Call history");
         JButton scheduleCall = new JButton("Schedule call");
+        JButton audioCall = new JButton("Audio call");
+        JButton videoCall = new JButton("Video call");
+        JButton acceptCall = new JButton("Accept");
+        JButton endCall = new JButton("End call");
         send.addActionListener(event -> sendMessage());
         composer.addActionListener(event -> sendMessage());
         attach.addActionListener(event -> uploadAttachment(frame));
         callHistory.addActionListener(event -> loadCallHistory());
         scheduleCall.addActionListener(event -> scheduleCall());
+        audioCall.addActionListener(event -> startCall("audio"));
+        videoCall.addActionListener(event -> startCall("video"));
+        acceptCall.addActionListener(event -> acceptIncomingCall());
+        endCall.addActionListener(event -> endActiveCall());
         status = new JLabel("Connected");
         JPanel bottom = new JPanel(new BorderLayout(6, 6));
         bottom.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
         bottom.add(composer, BorderLayout.CENTER);
-        JPanel actions = new JPanel(new GridLayout(1, 4, 6, 0));
+        JPanel actions = new JPanel(new GridLayout(2, 4, 6, 6));
         actions.add(send);
         actions.add(attach);
         actions.add(callHistory);
         actions.add(scheduleCall);
+        actions.add(audioCall);
+        actions.add(videoCall);
+        actions.add(acceptCall);
+        actions.add(endCall);
         bottom.add(actions, BorderLayout.EAST);
         JPanel right = new JPanel(new BorderLayout());
         right.add(new JScrollPane(messages), BorderLayout.CENTER);
@@ -146,6 +160,7 @@ public final class DesktopClientApp {
                 SwingUtilities.invokeLater(() -> {
                     refreshChats();
                     if (chatList.getSelectedValue() != null) refreshMessages();
+                    pollIncomingCalls();
                 });
             }
         }, 3000, 5000);
@@ -246,6 +261,58 @@ public final class DesktopClientApp {
             status.setText("Call scheduled for 10 minutes from now");
         } catch (Exception e) {
             status.setText("Scheduling is available for direct chats only");
+        }
+    }
+
+    private void startCall(String mediaType) {
+        ChatItem chat = chatList.getSelectedValue();
+        if (chat == null) return;
+        try {
+            String peer = jsonValue(request("GET", "/api/chats/" + encode(chat.id()) + "/peer", null, token), "username");
+            String response = request("POST", "/api/calls", "{\"chatId\":\"" + escape(chat.id())
+                    + "\",\"username\":\"" + escape(peer) + "\",\"mediaType\":\""
+                    + escape(mediaType) + "\"}", token);
+            activeCallId = jsonValue(response, "id");
+            status.setText("Call ringing (" + mediaType + "); native media capture requires the WebRTC client");
+        } catch (Exception e) {
+            showError(e);
+        }
+    }
+
+    private void pollIncomingCalls() {
+        try {
+            String response = request("GET", "/api/calls/incoming", null, token);
+            List<String> calls = objects(response);
+            if (!calls.isEmpty()) {
+                incomingCallId = jsonValue(calls.get(0), "id");
+                status.setText("Incoming " + jsonValue(calls.get(0), "mediaType") + " call — press Accept");
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void acceptIncomingCall() {
+        if (incomingCallId == null) return;
+        try {
+            request("POST", "/api/calls/" + encode(incomingCallId) + "/events",
+                    "{\"type\":\"accept\",\"payload\":\"\"}", token);
+            activeCallId = incomingCallId;
+            incomingCallId = null;
+            status.setText("Call accepted; native media capture requires the WebRTC client");
+        } catch (Exception e) {
+            showError(e);
+        }
+    }
+
+    private void endActiveCall() {
+        if (activeCallId == null) return;
+        try {
+            request("POST", "/api/calls/" + encode(activeCallId) + "/events",
+                    "{\"type\":\"end\",\"payload\":\"\"}", token);
+            activeCallId = null;
+            status.setText("Call ended");
+        } catch (Exception e) {
+            showError(e);
         }
     }
 

@@ -85,6 +85,17 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
                 broadcastPresence(username, presence);
                 return;
             }
+            if ("typing".equals(type)) {
+                String chatId = field(rawMessage, "chatId");
+                if (!repository.isChatMember(chatId, username)) {
+                    sendError(connection, "Chat is not available");
+                    return;
+                }
+                boolean active = "true".equalsIgnoreCase(field(rawMessage, "active"));
+                ChatRepository.UserAccount account = repository.findApprovedUser(username);
+                broadcastTyping(chatId, account == null ? username : account.displayName(), active);
+                return;
+            }
             if ("ping".equals(type)) {
                 connection.send("{\"type\":\"pong\"}");
                 return;
@@ -126,6 +137,14 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
                 + "\",\"presence\":\"" + escape(presence) + "\"}";
         users.keySet().forEach(connection -> {
             if (connection.isOpen()) connection.send(payload);
+        });
+    }
+
+    private void broadcastTyping(String chatId, String displayName, boolean active) {
+        String payload = "{\"type\":\"typing\",\"chatId\":\"" + escape(chatId)
+                + "\",\"name\":\"" + escape(displayName) + "\",\"active\":" + active + "}";
+        subscriptions.forEach((connection, chats) -> {
+            if (chats.contains(chatId) && connection.isOpen()) connection.send(payload);
         });
     }
 

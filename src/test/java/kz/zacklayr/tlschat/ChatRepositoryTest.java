@@ -145,6 +145,53 @@ class ChatRepositoryTest {
     }
 
     @Test
+    void changingAccessAutomaticallyReconcilesRoleChatMembership() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration app = repository.registerApplication(
+                    "Department Employee", "Developer", "Avengers", "Almaty", "+77001230000");
+            repository.decideRegistration(app.id(), "APPROVED", "Department Employee", "Developer",
+                    "Avengers", "Almaty", "+77001230000", "", "employee", "pass123");
+
+            var account = repository.authenticate("employee", "pass123");
+            assertTrue(repository.findChatsForUser(account).stream().noneMatch(c -> "leaders".equals(c.id())));
+
+            repository.setUserPermissions("employee", "department_lead");
+            account = repository.authenticate("employee", "pass123");
+            assertTrue(repository.findChatsForUser(account).stream().anyMatch(c -> "leaders".equals(c.id())));
+
+            repository.updateUserAccess("employee", "SUSPENDED", "department_lead");
+            assertTrue(repository.findChatsForUser(account).stream().noneMatch(c -> "leaders".equals(c.id())));
+            assertThrows(IllegalArgumentException.class, () -> repository.authenticate("employee", "pass123"));
+        }
+    }
+
+    @Test
+    void dueScheduledCallsAreClaimedExactlyOnce() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration first = repository.registerApplication(
+                    "Caller", "Developer", "Avengers", "Almaty", "+77001230001");
+            repository.decideRegistration(first.id(), "APPROVED", "Caller", "Developer", "Avengers", "Almaty",
+                    "+77001230001", "", "caller", "pass123");
+            ChatRepository.Registration second = repository.registerApplication(
+                    "Callee", "Developer", "Avengers", "Almaty", "+77001230002");
+            repository.decideRegistration(second.id(), "APPROVED", "Callee", "Developer", "Avengers", "Almaty",
+                    "+77001230002", "", "callee", "pass123");
+            repository.assignChatsForUser("caller");
+            repository.assignChatsForUser("callee");
+            ChatRepository.ScheduledCall scheduled = repository.scheduleCall("anonymous", "caller", "callee",
+                    "audio", Instant.now().plusSeconds(30));
+
+            assertTrue(repository.claimDueScheduledCalls(Instant.now()).isEmpty());
+            var ready = repository.claimDueScheduledCalls(scheduled.scheduledAt().plusSeconds(1));
+            assertEquals(1, ready.size());
+            assertEquals("READY", ready.get(0).status());
+            assertTrue(repository.claimDueScheduledCalls(Instant.now().plusSeconds(60)).isEmpty());
+        }
+    }
+
+    @Test
     void anonymousChatMasksSender() throws Exception {
         database = Files.createTempFile("tls-chat-test-", ".db");
         try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
@@ -227,6 +274,33 @@ class ChatRepositoryTest {
                     () -> repository.addCallEvent(missedCall.id(), "employee", "accept", ""));
             repository.addMessage(direct.id(), "ceo", ceo.permissions(), "Important message");
             assertEquals(1, repository.findMessages(direct.id(), "employee").size());
+        }
+    }
+
+    @Test
+    void employeesCanStartPeerDirectChatsButCannotOpenCeoChat() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration first = repository.registerApplication(
+                    "First Employee", "Developer", "Avengers", "Almaty", "+77001230003");
+            repository.decideRegistration(first.id(), "APPROVED", "First Employee", "Developer", "Avengers", "Almaty",
+                    "+77001230003", "", "first", "pass123");
+            ChatRepository.Registration second = repository.registerApplication(
+                    "Second Employee", "Artist", "Avengers", "Almaty", "+77001230004");
+            repository.decideRegistration(second.id(), "APPROVED", "Second Employee", "Artist", "Avengers", "Almaty",
+                    "+77001230004", "", "second", "pass123");
+            ChatRepository.ChatDefinition peerChat = repository.ensureDirectChat(
+                    repository.authenticate("first", "pass123"), "second");
+            assertTrue(repository.isChatMember(peerChat.id(), "first"));
+            assertTrue(repository.isChatMember(peerChat.id(), "second"));
+
+            ChatRepository.Registration ceo = repository.registerApplication(
+                    "Chief", "Director", "Высшее руководство", "Almaty", "+77001230005");
+            repository.decideRegistration(ceo.id(), "APPROVED", "Chief", "Director", "Высшее руководство", "Almaty",
+                    "+77001230005", "", "chief", "pass123");
+            repository.setUserPermissions("chief", "ceo");
+            assertThrows(IllegalArgumentException.class, () -> repository.ensureDirectChat(
+                    repository.authenticate("first", "pass123"), "chief"));
         }
     }
 

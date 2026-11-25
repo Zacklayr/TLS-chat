@@ -23,12 +23,15 @@ class ChatServerTest {
                     HttpResponse.BodyHandlers.ofString());
             assertEquals(200, response.statusCode());
             assertTrue(response.body().contains("\"status\":\"ok\""));
+            assertEquals("nosniff", response.headers().firstValue("X-Content-Type-Options").orElse(""));
+            assertEquals("DENY", response.headers().firstValue("X-Frame-Options").orElse(""));
 
             HttpResponse<String> webPage = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/")).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
             assertEquals(200, webPage.statusCode());
             assertTrue(webPage.body().contains("compressImage"));
+            assertTrue(webPage.headers().firstValue("Content-Security-Policy").orElse("").contains("frame-ancestors 'none'"));
 
             HttpResponse<String> adminPage = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/admin")).GET().build(),
@@ -118,6 +121,78 @@ class ChatServerTest {
         } finally {
             Files.deleteIfExists(database);
         }
+    }
+
+    @Test
+    void runsTwoPartyCallLifecycleOverHttp() throws Exception {
+        var database = Files.createTempFile("tls-chat-call-test-", ".db");
+        String directChatId;
+        try (ChatRepository seed = new ChatRepository("jdbc:sqlite:" + database.toAbsolutePath())) {
+            var ceoRequest = seed.registerApplication("Call CEO", "Director", "Leadership", "Almaty", "+70000000001");
+            seed.decideRegistration(ceoRequest.id(), "APPROVED", ceoRequest.fullName(), ceoRequest.profession(),
+                    ceoRequest.workplace(), ceoRequest.region(), ceoRequest.phone(), "", "call_ceo", "password123");
+            seed.setUserPermissions("call_ceo", "ceo");
+            var employeeRequest = seed.registerApplication("Call Employee", "Developer", "Engine", "Almaty", "+70000000002");
+            seed.decideRegistration(employeeRequest.id(), "APPROVED", employeeRequest.fullName(), employeeRequest.profession(),
+                    employeeRequest.workplace(), employeeRequest.region(), employeeRequest.phone(), "", "call_employee", "password123");
+            directChatId = seed.ensureDirectChat(seed.authenticate("call_ceo", "password123"), "call_employee").id();
+        }
+        try (ChatServer server = new ChatServer(0, database)) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String base = "http://127.0.0.1:" + server.port();
+            String callerToken = loginToken(client, base, "call_ceo");
+            String calleeToken = loginToken(client, base, "call_employee");
+
+            HttpResponse<String> created = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls"))
+                    .header("Authorization", "Bearer " + callerToken)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"chatId\":\"" + directChatId
+                            + "\",\"username\":\"call_employee\",\"mediaType\":\"audio\"}"))
+                    .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(201, created.statusCode());
+            String callId = jsonValue(created.body(), "id");
+
+            HttpResponse<String> incoming = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls/incoming"))
+                    .header("Authorization", "Bearer " + calleeToken).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, incoming.statusCode());
+            assertTrue(incoming.body().contains(callId));
+
+            HttpResponse<String> accepted = postCallEvent(client, base, callId, calleeToken, "accept");
+            assertEquals(201, accepted.statusCode());
+            HttpResponse<String> active = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls/" + callId))
+                    .header("Authorization", "Bearer " + callerToken).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, active.statusCode());
+            assertTrue(active.body().contains("\"status\":\"ACTIVE\""));
+
+            HttpResponse<String> ended = postCallEvent(client, base, callId, callerToken, "end");
+            assertEquals(201, ended.statusCode());
+            HttpResponse<String> finished = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls/" + callId))
+                    .header("Authorization", "Bearer " + calleeToken).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, finished.statusCode());
+            assertTrue(finished.body().contains("\"status\":\"ENDED\""));
+        } finally {
+            Files.deleteIfExists(database);
+        }
+    }
+
+    private static String loginToken(HttpClient client, String base, String username) throws Exception {
+        HttpResponse<String> login = client.send(HttpRequest.newBuilder(URI.create(base + "/api/login"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"username\":\"" + username
+                        + "\",\"password\":\"password123\"}"))
+                .build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, login.statusCode());
+        return jsonValue(login.body(), "token");
+    }
+
+    private static HttpResponse<String> postCallEvent(HttpClient client, String base, String callId,
+                                                       String token, String type) throws Exception {
+        return client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls/" + callId + "/events"))
+                .header("Authorization", "Bearer " + token)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"type\":\"" + type + "\",\"payload\":\"\"}"))
+                .build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private static String jsonValue(String json, String key) {

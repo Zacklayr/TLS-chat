@@ -482,10 +482,10 @@ public final class ChatRepository implements AutoCloseable {
 
     public synchronized void assignChatsForUser(String username) throws SQLException {
         try (PreparedStatement user = conn().prepareStatement(
-                "SELECT profession, workplace, region, permissions FROM users WHERE username = ?")) {
+                "SELECT profession, workplace, region, permissions, status FROM users WHERE username = ?")) {
             user.setString(1, username);
             try (ResultSet userResult = user.executeQuery()) {
-                if (!userResult.next()) {
+                if (!userResult.next() || !"APPROVED".equals(userResult.getString("status"))) {
                     return;
                 }
                 String userProf = userResult.getString("profession");
@@ -594,6 +594,7 @@ public final class ChatRepository implements AutoCloseable {
                 throw new IllegalArgumentException("User not found");
             }
         }
+        reconcileMembershipsForUser(normalizedUsername, status);
         for (AdminUser user : adminUsers()) {
             if (user.username().equals(normalizedUsername)) {
                 return user;
@@ -809,6 +810,32 @@ public final class ChatRepository implements AutoCloseable {
             }
         }
         return calls;
+    }
+
+    public synchronized List<ScheduledCall> claimDueScheduledCalls(Instant now) throws SQLException {
+        List<ScheduledCall> due = new ArrayList<>();
+        List<ScheduledCall> candidates = new ArrayList<>();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT id, chat_id, creator, callee, media_type, scheduled_at, status, created_at "
+                        + "FROM scheduled_calls WHERE status = 'SCHEDULED' AND scheduled_at <= ? ORDER BY scheduled_at")) {
+            statement.setString(1, now.toString());
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    candidates.add(scheduledCallFrom(result));
+                }
+            }
+        }
+        try (PreparedStatement claim = conn().prepareStatement(
+                "UPDATE scheduled_calls SET status = 'READY' WHERE id = ? AND status = 'SCHEDULED'")) {
+            for (ScheduledCall call : candidates) {
+                claim.setString(1, call.id());
+                if (claim.executeUpdate() == 1) {
+                    due.add(new ScheduledCall(call.id(), call.chatId(), call.creator(), call.callee(),
+                            call.mediaType(), call.scheduledAt(), "READY", call.createdAt()));
+                }
+            }
+        }
+        return due;
     }
 
     public synchronized ScheduledCall cancelScheduledCall(String id, String username) throws SQLException {
@@ -1461,16 +1488,41 @@ public final class ChatRepository implements AutoCloseable {
                 throw new IllegalArgumentException("Одобренный пользователь не найден");
             }
         }
+        reconcileMembershipsForUser(username.toLowerCase(Locale.ROOT), "APPROVED");
+    }
+
+    private void reconcileMembershipsForUser(String username, String status) throws SQLException {
+        String normalizedUsername = username == null ? "" : username.toLowerCase(Locale.ROOT);
+        try (PreparedStatement statement = conn().prepareStatement(
+                "DELETE FROM chat_members WHERE username = ? AND chat_id IN "
+                        + "(SELECT id FROM chats WHERE type <> 'direct')")) {
+            statement.setString(1, normalizedUsername);
+            statement.executeUpdate();
+        }
+        if ("APPROVED".equals(status)) {
+            assignChatsForUser(normalizedUsername);
+            return;
+        }
+        try (PreparedStatement statement = conn().prepareStatement("DELETE FROM sessions WHERE username = ?")) {
+            statement.setString(1, normalizedUsername);
+            statement.executeUpdate();
+        }
     }
 
     public synchronized ChatDefinition ensureDirectChat(UserAccount owner, String targetUsername)
             throws SQLException {
-        if (!hasPermission(owner, "ceo")) {
-            throw new IllegalArgumentException("Только гендиректор может начинать личные чаты");
+        if (owner == null) {
+            throw new IllegalArgumentException("Войдите в систему");
         }
         UserAccount target = findApprovedUser(targetUsername);
         if (target == null) {
             throw new IllegalArgumentException("Сотрудник не найден");
+        }
+        if (owner.username().equals(target.username())) {
+            throw new IllegalArgumentException("Нельзя открыть чат с собой");
+        }
+        if (!hasPermission(owner, "ceo") && hasPermission(target, "ceo")) {
+            throw new IllegalArgumentException("Личный чат с CEO доступен только по приглашению CEO");
         }
         String id = "dm-" + stableId(owner.username() + "-" + target.username());
         try (PreparedStatement statement = conn().prepareStatement(

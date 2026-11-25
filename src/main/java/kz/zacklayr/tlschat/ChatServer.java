@@ -2,6 +2,7 @@ package kz.zacklayr.tlschat;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsExchange;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsParameters;
 import com.sun.net.httpserver.HttpsServer;
@@ -22,6 +23,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 public final class ChatServer implements AutoCloseable {
@@ -30,6 +33,7 @@ public final class ChatServer implements AutoCloseable {
     private final ChatRepository repository;
     private final AttachmentStorage attachmentStorage;
     private final GitHubService githubService = new GitHubService();
+    private final ScheduledExecutorService scheduledCallDispatcher = Executors.newSingleThreadScheduledExecutor();
     private ChatWebSocketServer webSocketServer;
     public ChatServer(int port, Path database) throws IOException, SQLException {
         String databaseUrl = System.getenv("DATABASE_URL");
@@ -273,6 +277,7 @@ public final class ChatServer implements AutoCloseable {
                 String downloadName = attachment.originalName().replaceAll("[\\\"\\r\\n]", "_");
                 exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\""
                         + downloadName + "\"");
+                securityHeaders(exchange);
                 exchange.sendResponseHeaders(200, data.length);
                 try (OutputStream output = exchange.getResponseBody()) {
                     output.write(data);
@@ -391,6 +396,7 @@ public final class ChatServer implements AutoCloseable {
 
     public void start() {
         server.start();
+        scheduledCallDispatcher.scheduleWithFixedDelay(this::dispatchDueScheduledCalls, 5, 15, TimeUnit.SECONDS);
         String websocketPort = System.getenv("WS_PORT");
         if (websocketPort != null && !websocketPort.isBlank()) {
             try {
@@ -399,6 +405,26 @@ public final class ChatServer implements AutoCloseable {
             } catch (NumberFormatException e) {
                 throw new IllegalStateException("WS_PORT must be a number", e);
             }
+        }
+    }
+
+    private void dispatchDueScheduledCalls() {
+        try {
+            for (ChatRepository.ScheduledCall call : repository.claimDueScheduledCalls(Instant.now())) {
+                String title = "Запланированный звонок готов";
+                String body = ("video".equals(call.mediaType()) ? "Видео" : "Аудио")
+                        + " звонок по расписанию. Откройте личный чат и начните звонок.";
+                ChatRepository.Notification creator = repository.createNotification(
+                        call.creator(), title, body, "info", "system", null);
+                ChatRepository.Notification callee = repository.createNotification(
+                        call.callee(), title, body, "info", "system", null);
+                if (webSocketServer != null) {
+                    webSocketServer.broadcastNotification(creator);
+                    webSocketServer.broadcastNotification(callee);
+                }
+            }
+        } catch (SQLException ignored) {
+            // The next scheduled pass retries other pending calls; HTTP/API traffic remains available.
         }
     }
 
@@ -712,8 +738,8 @@ public final class ChatServer implements AutoCloseable {
     private void handleUsers(HttpExchange exchange) throws IOException {
         try {
             ChatRepository.UserAccount account = authenticatedUser(exchange);
-            if (account == null || !hasPermission(account, "ceo")) {
-                writeJson(exchange, 403, "{\"error\":\"CEO permission required\"}");
+            if (account == null) {
+                writeJson(exchange, 401, "{\"error\":\"Login required\"}");
                 return;
             }
             if (!"GET".equals(exchange.getRequestMethod())) {
@@ -763,6 +789,7 @@ public final class ChatServer implements AutoCloseable {
                 : resourceName.endsWith(".svg") ? "image/svg+xml"
                 : "text/html; charset=UTF-8";
         exchange.getResponseHeaders().set("Content-Type", contentType);
+        securityHeaders(exchange);
         exchange.sendResponseHeaders(200, content.length);
         try (OutputStream output = exchange.getResponseBody()) {
             output.write(content);
@@ -799,6 +826,7 @@ public final class ChatServer implements AutoCloseable {
             byte[] bytes = Files.readAllBytes(filePath);
             exchange.getResponseHeaders().set("Content-Type", mime);
             exchange.getResponseHeaders().set("Cache-Control", "public, max-age=3600");
+            securityHeaders(exchange);
             exchange.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(bytes);
@@ -1035,6 +1063,7 @@ public final class ChatServer implements AutoCloseable {
         byte[] content = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        securityHeaders(exchange);
         if (status == 204) {
             exchange.sendResponseHeaders(status, -1);
             return;
@@ -1045,8 +1074,25 @@ public final class ChatServer implements AutoCloseable {
         }
     }
 
+    private static void securityHeaders(HttpExchange exchange) {
+        exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+        exchange.getResponseHeaders().set("X-Frame-Options", "DENY");
+        exchange.getResponseHeaders().set("Referrer-Policy", "strict-origin-when-cross-origin");
+        exchange.getResponseHeaders().set("Permissions-Policy", "camera=(self), microphone=(self)");
+        exchange.getResponseHeaders().set("Content-Security-Policy",
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                        + "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; "
+                        + "object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+        String forwardedProto = exchange.getRequestHeaders().getFirst("X-Forwarded-Proto");
+        if (exchange instanceof HttpsExchange || "https".equalsIgnoreCase(forwardedProto)) {
+            exchange.getResponseHeaders().set("Strict-Transport-Security",
+                    "max-age=31536000; includeSubDomains");
+        }
+    }
+
     @Override
     public void close() {
+        scheduledCallDispatcher.shutdownNow();
         if (webSocketServer != null) {
             webSocketServer.close();
         }

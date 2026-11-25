@@ -69,5 +69,14 @@ Only features that compile, have tests where practical, and are exercised throug
 - Heroku remains suitable for the stateless web/API process and Heroku Postgres, but uploaded files must move to object storage before production because the dyno filesystem is ephemeral.
 - Added an S3-compatible attachment storage adapter; local disk remains the development default, while Heroku can use `FILE_STORAGE_MODE=s3` with bucket/region/prefix environment configuration.
 - Added browser-side media compression before upload (images to 1920px JPEG; supported videos to 1280px WebM with automatic original-file fallback) and an offline mini-game fallback available from the login shell.
+- Added realtime typing indicators over the authenticated WebSocket channel with membership checks and a REST-compatible fallback path.
+- Added baseline browser/API security headers, including CSP, clickjacking protection, MIME sniffing protection, referrer policy, camera/microphone permissions, and proxy-aware HSTS.
+- Added automatic membership reconciliation after registrar/admin role changes; suspended users lose group access and active sessions, while direct-chat membership is preserved for later reactivation.
+- Added a server-side scheduled-call dispatcher that claims due calls once and delivers notifications to both participants.
+- Added an optional Docker Compose Cloudflare Tunnel profile for public HTTPS access without inbound port forwarding; the tunnel token remains environment-only.
+- Relaxed direct-chat creation for peer employees while retaining the CEO invitation boundary, and exposed the authenticated employee directory needed to start those conversations.
+- Extended Android and desktop clients with call-session controls (start audio/video session, poll incoming calls, accept, and end) over the shared signaling API; native camera/microphone capture remains a separate WebRTC client step.
+- Extended the deployment smoke test with authentication-boundary and security-header checks, and added a manually triggered GitHub workflow for validating the published Heroku instance after deployment.
+- Added a two-user HTTP integration test covering call creation, incoming-call visibility, acceptance, active state, and clean termination.
 
 The browser call flow is now wired to the signaling API, but it still requires two-client end-to-end testing and production TURN configuration. Docker Compose configuration is present but Docker is not installed in the current environment, so the container stack has not been executed here. Android and desktop call flows still require their clients.
