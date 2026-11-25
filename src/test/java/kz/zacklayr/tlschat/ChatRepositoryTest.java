@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -272,6 +273,41 @@ class ChatRepositoryTest {
             Message m2 = repository.addMessage("helpdesk", "AI Helpdesk Bot", "", "Обращение принято");
             assertEquals("AI Helpdesk Bot", m2.sender());
             assertEquals("Обращение принято", m2.text());
+        }
+    }
+
+    @Test
+    void supportsProfilesNotificationsScheduledCallsAndAdminAccess() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            repository.createChat("planning", "group", "Planning", "c-blue", "", "", "", "");
+            var first = repository.registerApplication("First Employee", "Developer", "Engine", "Almaty", "+77000000001");
+            repository.decideRegistration(first.id(), "APPROVED", "First Employee", "Developer", "Engine", "Almaty",
+                    "+77000000001", "", "first", "pass123");
+            var second = repository.registerApplication("Second Employee", "QA", "Engine", "Almaty", "+77000000002");
+            repository.decideRegistration(second.id(), "APPROVED", "Second Employee", "QA", "Engine", "Almaty",
+                    "+77000000002", "", "second", "pass123");
+            repository.assignChatsForUser("first");
+            repository.assignChatsForUser("second");
+
+            var profile = repository.updateProfile("first", "Работаю над сетевым слоем", "busy");
+            assertEquals("busy", profile.presence());
+            assertEquals("Работаю над сетевым слоем", profile.about());
+
+            var notification = repository.createNotification("", "Важное объявление", "Планёрка в 10:00",
+                    "emergency", "admin", Instant.now().plusSeconds(3600));
+            assertEquals(1, repository.findNotifications("first").size());
+            repository.markNotificationRead(notification.id(), "first");
+            assertTrue(repository.findNotifications("first").get(0).read());
+
+            var scheduled = repository.scheduleCall("planning", "first", "second", "video",
+                    Instant.now().plusSeconds(3600));
+            assertEquals(1, repository.findScheduledCalls("second").size());
+            assertEquals("CANCELLED", repository.cancelScheduledCall(scheduled.id(), "second").status());
+
+            var adminUser = repository.updateUserAccess("second", "SUSPENDED", "support_agent");
+            assertEquals("SUSPENDED", adminUser.status());
+            assertEquals("support_agent", adminUser.permissions());
         }
     }
 

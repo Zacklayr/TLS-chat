@@ -20,6 +20,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
@@ -27,14 +28,15 @@ public final class ChatServer implements AutoCloseable {
     private static final long MAX_ATTACHMENT_BYTES = 25L * 1024 * 1024;
     private final HttpServer server;
     private final ChatRepository repository;
-    private final Path fileStorage;
+    private final AttachmentStorage attachmentStorage;
+    private final GitHubService githubService = new GitHubService();
+    private ChatWebSocketServer webSocketServer;
     public ChatServer(int port, Path database) throws IOException, SQLException {
         String databaseUrl = System.getenv("DATABASE_URL");
         repository = new ChatRepository(databaseUrl == null || databaseUrl.isBlank()
                 ? "jdbc:sqlite:" + database.toAbsolutePath()
                 : databaseUrl);
-        fileStorage = Path.of(System.getenv().getOrDefault("FILE_STORAGE_DIR", "uploads")).toAbsolutePath().normalize();
-        Files.createDirectories(fileStorage);
+        attachmentStorage = AttachmentStorage.fromEnvironment();
         server = createServer(port);
         server.createContext("/api/registration", this::handleRegistration);
         server.createContext("/api/login", this::handleLogin);
@@ -42,6 +44,8 @@ public final class ChatServer implements AutoCloseable {
         server.createContext("/health", this::handleHealth);
         server.createContext("/api/files", this::handleFiles);
         server.createContext("/api/calls", this::handleCalls);
+        server.createContext("/api/profile", this::handleProfile);
+        server.createContext("/api/notifications", this::handleNotifications);
         server.createContext("/api/registrar", this::handleRegistrar);
         server.createContext("/api/admin", this::handleAdmin);
         server.createContext("/api/chats", this::handleChats);
@@ -97,6 +101,7 @@ public final class ChatServer implements AutoCloseable {
             ChatRepository.UserAccount account = repository.authenticate(
                     jsonValue(body, "username"), jsonValue(body, "password"));
             String token = repository.createSession("USER", account.username());
+            repository.updatePresence(account.username(), "online");
             writeJson(exchange, 200, "{\"token\":\"" + token + "\",\"username\":\"" +
                     escape(account.username()) + "\",\"displayName\":\"" +
                     escape(account.displayName()) + "\",\"profession\":\"" +
@@ -121,7 +126,12 @@ public final class ChatServer implements AutoCloseable {
             }
             String header = exchange.getRequestHeaders().getFirst("Authorization");
             if (header != null && header.startsWith("Bearer ")) {
-                repository.deleteSession(header.substring("Bearer ".length()).trim());
+                String token = header.substring("Bearer ".length()).trim();
+                ChatRepository.Session session = repository.findSession(token);
+                if (session != null && session.username() != null && !session.username().isBlank()) {
+                    repository.updatePresence(session.username(), "offline");
+                }
+                repository.deleteSession(token);
             }
             writeJson(exchange, 204, "");
         } catch (SQLException e) {
@@ -138,6 +148,63 @@ public final class ChatServer implements AutoCloseable {
                 return;
             }
             writeJson(exchange, 200, "{\"status\":\"ok\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void handleProfile(HttpExchange exchange) throws IOException {
+        try {
+            ChatRepository.UserAccount account = authenticatedUser(exchange);
+            if (account == null) {
+                writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+                return;
+            }
+            if ("GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, profileJson(repository.findProfile(account.username())));
+                return;
+            }
+            if ("PUT".equals(exchange.getRequestMethod()) || "POST".equals(exchange.getRequestMethod())) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                String about = optionalJsonValue(body, "about", "");
+                String presence = optionalJsonValue(body, "presence", "online");
+                writeJson(exchange, 200, profileJson(repository.updateProfile(account.username(), about, presence)));
+                return;
+            }
+            writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void handleNotifications(HttpExchange exchange) throws IOException {
+        try {
+            ChatRepository.UserAccount account = authenticatedUser(exchange);
+            if (account == null) {
+                writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+                return;
+            }
+            String path = exchange.getRequestURI().getPath();
+            if ("/api/notifications".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, notificationsJson(repository.findNotifications(account.username())));
+                return;
+            }
+            String prefix = "/api/notifications/";
+            if (path.startsWith(prefix) && path.endsWith("/read") && "POST".equals(exchange.getRequestMethod())) {
+                String id = URLDecoder.decode(path.substring(prefix.length(), path.length() - "/read".length()), StandardCharsets.UTF_8);
+                repository.markNotificationRead(id, account.username());
+                writeJson(exchange, 204, "");
+                return;
+            }
+            writeJson(exchange, 404, "{\"error\":\"Not found\"}");
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
         } finally {
             exchange.close();
         }
@@ -176,16 +243,12 @@ public final class ChatServer implements AutoCloseable {
                     return;
                 }
                 String storedName = java.util.UUID.randomUUID() + "-" + safeExtension(originalName);
-                Path storedPath = fileStorage.resolve(storedName).normalize();
-                if (!storedPath.getParent().equals(fileStorage)) {
-                    throw new IllegalArgumentException("Invalid file path");
-                }
-                Files.write(storedPath, data);
+                attachmentStorage.put(storedName, data, contentType);
                 try {
                     attachment = repository.createAttachment(chatId, account.username(), originalName,
                             storedName, contentType, data.length);
                 } catch (RuntimeException | SQLException e) {
-                    Files.deleteIfExists(storedPath);
+                    attachmentStorage.delete(storedName);
                     throw e;
                 }
                 writeJson(exchange, 201, attachmentJson(attachment));
@@ -199,12 +262,13 @@ public final class ChatServer implements AutoCloseable {
                     writeJson(exchange, 404, "{\"error\":\"File not found\"}");
                     return;
                 }
-                Path storedPath = fileStorage.resolve(attachment.storedName()).normalize();
-                if (!storedPath.getParent().equals(fileStorage) || !Files.isRegularFile(storedPath)) {
+                byte[] data;
+                try {
+                    data = attachmentStorage.get(attachment.storedName());
+                } catch (IOException e) {
                     writeJson(exchange, 404, "{\"error\":\"File not found\"}");
                     return;
                 }
-                byte[] data = Files.readAllBytes(storedPath);
                 exchange.getResponseHeaders().set("Content-Type", attachment.contentType());
                 String downloadName = attachment.originalName().replaceAll("[\\\"\\r\\n]", "_");
                 exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\""
@@ -233,6 +297,10 @@ public final class ChatServer implements AutoCloseable {
                 return;
             }
             String path = exchange.getRequestURI().getPath();
+            if ("/api/calls/ice-servers".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, iceServersJson());
+                return;
+            }
             if ("/api/calls".equals(path) && "POST".equals(exchange.getRequestMethod())) {
                 String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
                 ChatRepository.Call call = repository.createCall(
@@ -243,6 +311,31 @@ public final class ChatServer implements AutoCloseable {
             }
             if ("/api/calls/incoming".equals(path) && "GET".equals(exchange.getRequestMethod())) {
                 writeJson(exchange, 200, callsJson(repository.findIncomingCalls(account.username())));
+                return;
+            }
+            if ("/api/calls/history".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                String limitValue = queryValue(exchange.getRequestURI().getRawQuery(), "limit");
+                int limit = limitValue.isBlank() ? 50 : Integer.parseInt(limitValue);
+                writeJson(exchange, 200, callsJson(repository.findCallHistory(account.username(), limit)));
+                return;
+            }
+            if ("/api/calls/scheduled".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, scheduledCallsJson(repository.findScheduledCalls(account.username())));
+                return;
+            }
+            if ("/api/calls/scheduled".equals(path) && "POST".equals(exchange.getRequestMethod())) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                ChatRepository.ScheduledCall scheduled = repository.scheduleCall(
+                        jsonValue(body, "chatId"), account.username(), jsonValue(body, "username"),
+                        jsonValue(body, "mediaType"), Instant.parse(jsonValue(body, "scheduledAt")));
+                writeJson(exchange, 201, scheduledCallJson(scheduled));
+                return;
+            }
+            String scheduledPrefix = "/api/calls/scheduled/";
+            if (path.startsWith(scheduledPrefix) && "POST".equals(exchange.getRequestMethod())) {
+                ChatRepository.ScheduledCall scheduled = repository.cancelScheduledCall(
+                        URLDecoder.decode(path.substring(scheduledPrefix.length()), StandardCharsets.UTF_8), account.username());
+                writeJson(exchange, 200, scheduledCallJson(scheduled));
                 return;
             }
             String prefix = "/api/calls/";
@@ -286,7 +379,7 @@ public final class ChatServer implements AutoCloseable {
             }
             writeJson(exchange, 404, "{\"error\":\"Not found\"}");
         } catch (NumberFormatException e) {
-            writeJson(exchange, 400, "{\"error\":\"Invalid event cursor\"}");
+            writeJson(exchange, 400, "{\"error\":\"Invalid numeric call parameter\"}");
         } catch (IllegalArgumentException e) {
             writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
         } catch (SQLException e) {
@@ -298,6 +391,15 @@ public final class ChatServer implements AutoCloseable {
 
     public void start() {
         server.start();
+        String websocketPort = System.getenv("WS_PORT");
+        if (websocketPort != null && !websocketPort.isBlank()) {
+            try {
+                webSocketServer = new ChatWebSocketServer(Integer.parseInt(websocketPort), repository);
+                webSocketServer.start();
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("WS_PORT must be a number", e);
+            }
+        }
     }
 
     public int port() {
@@ -434,11 +536,79 @@ public final class ChatServer implements AutoCloseable {
                 writeJson(exchange, 201, chatJson(chat));
                 return;
             }
+            if ("/api/admin/users".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, adminUsersJson(repository.adminUsers()));
+                return;
+            }
+            if ("/api/admin/registrations".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, registrationsJson(repository.pendingRegistrations()));
+                return;
+            }
+            String registrationsPrefix = "/api/admin/registrations/";
+            if (path.startsWith(registrationsPrefix) && "POST".equals(exchange.getRequestMethod())) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                ChatRepository.Registration registration = repository.decideRegistration(
+                        URLDecoder.decode(path.substring(registrationsPrefix.length()), StandardCharsets.UTF_8),
+                        jsonValue(body, "status"), optionalJsonValue(body, "fullName", null),
+                        optionalJsonValue(body, "profession", null), optionalJsonValue(body, "workplace", null),
+                        optionalJsonValue(body, "region", null), optionalJsonValue(body, "phone", null),
+                        optionalJsonValue(body, "permissions", ""), optionalJsonValue(body, "username", null),
+                        optionalJsonValue(body, "password", null));
+                if ("APPROVED".equals(registration.status())) {
+                    repository.assignChatsForUser(registration.accountUsername());
+                }
+                writeJson(exchange, 200, registrationJson(registration));
+                return;
+            }
+            String usersPrefix = "/api/admin/users/";
+            if (path.startsWith(usersPrefix) && "POST".equals(exchange.getRequestMethod())) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                String username = URLDecoder.decode(path.substring(usersPrefix.length()), StandardCharsets.UTF_8);
+                ChatRepository.AdminUser user = repository.updateUserAccess(username,
+                        jsonValue(body, "status"), jsonValue(body, "permissions"),
+                        optionalJsonValue(body, "temporaryPassword", ""));
+                writeJson(exchange, 200, adminUserJson(user));
+                return;
+            }
+            if ("/api/admin/notifications".equals(path) && "POST".equals(exchange.getRequestMethod())) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                String recipient = optionalJsonValue(body, "recipient", "");
+                String expiresAtValue = optionalJsonValue(body, "expiresAt", "");
+                Instant expiresAt = expiresAtValue.isBlank() ? null : Instant.parse(expiresAtValue);
+                ChatRepository.Notification notification = repository.createNotification(
+                        recipient, jsonValue(body, "title"), jsonValue(body, "body"),
+                        jsonValue(body, "severity"), "admin", expiresAt);
+                writeJson(exchange, 201, notificationJson(notification));
+                return;
+            }
+            if ("/api/admin/github/commits".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                if (!githubService.configured()) {
+                    writeJson(exchange, 503, "{\"error\":\"GitHub integration is not configured\"}");
+                    return;
+                }
+                writeJson(exchange, 200, githubService.commits());
+                return;
+            }
+            String githubCommentPrefix = "/api/admin/github/commits/";
+            if (path.startsWith(githubCommentPrefix) && path.endsWith("/comments")
+                    && "POST".equals(exchange.getRequestMethod())) {
+                if (!githubService.configured()) {
+                    writeJson(exchange, 503, "{\"error\":\"GitHub integration is not configured\"}");
+                    return;
+                }
+                String sha = URLDecoder.decode(path.substring(githubCommentPrefix.length(), path.length() - "/comments".length()), StandardCharsets.UTF_8);
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                writeJson(exchange, 201, githubService.comment(sha, jsonValue(body, "body")));
+                return;
+            }
             writeJson(exchange, 404, "{\"error\":\"Not found\"}");
         } catch (IllegalArgumentException e) {
             writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
         } catch (SQLException e) {
             writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            writeJson(exchange, 502, "{\"error\":\"GitHub request was interrupted\"}");
         } finally {
             exchange.close();
         }
@@ -485,6 +655,7 @@ public final class ChatServer implements AutoCloseable {
                 String chatId = parts[3];
                 Message message = repository.addMessage(chatId, account.username(), account.permissions(), text);
                 writeJson(exchange, 201, messageJson(message));
+                broadcastMessage(chatId, message);
                 if ("marsel-cat".equals(chatId)) {
                     Path marselDir = Path.of("photos", "marsel");
                     List<Path> photoList = List.of();
@@ -510,11 +681,11 @@ public final class ChatServer implements AutoCloseable {
                         String photoUrl = "/photos/marsel/" + chosen.getFileName().toString();
                         meow += "\n[photo:" + photoUrl + "]";
                     }
-                    repository.addMessage("marsel-cat", "Марсель 🐾", "", meow);
+                    broadcastMessage("marsel-cat", repository.addMessage("marsel-cat", "Марсель 🐾", "", meow));
                 } else if ("helpdesk".equals(chatId) && !account.permissions().contains("support_agent")) {
                     String autoReply = "🤖 Бот техподдержки: Здравствуйте, " + account.displayName() +
                             "! Ваше обращение принято: «" + text + "». Дежурный специалист техподдержки уже видит ваш запрос и ответит вам здесь!";
-                    repository.addMessage("helpdesk", "AI Helpdesk Bot", "", autoReply);
+                    broadcastMessage("helpdesk", repository.addMessage("helpdesk", "AI Helpdesk Bot", "", autoReply));
                 }
                 return;
             } else {
@@ -526,6 +697,12 @@ public final class ChatServer implements AutoCloseable {
             writeJson(exchange, 500, "{\"error\":\"Database error\"}");
         } finally {
             exchange.close();
+        }
+    }
+
+    private void broadcastMessage(String chatId, Message message) {
+        if (webSocketServer != null) {
+            webSocketServer.broadcast(chatId, message);
         }
     }
 
@@ -555,13 +732,22 @@ public final class ChatServer implements AutoCloseable {
     }
 
     private void handlePage(HttpExchange exchange) throws IOException {
-        if (!"GET".equals(exchange.getRequestMethod()) || !"/".equals(exchange.getRequestURI().getPath())) {
+        String requestPath = exchange.getRequestURI().getPath();
+        boolean knownPage = "/".equals(requestPath) || "/admin".equals(requestPath)
+                || "/manifest.webmanifest".equals(requestPath) || "/sw.js".equals(requestPath)
+                || "/icons/tls-chat.svg".equals(requestPath);
+        if (!"GET".equals(exchange.getRequestMethod()) || !knownPage) {
             writeJson(exchange, 404, "{\"error\":\"Not found\"}");
             exchange.close();
             return;
         }
         byte[] content;
-        try (InputStream page = ChatServer.class.getResourceAsStream("/web/index.html")) {
+        String resourceName = "/admin".equals(requestPath) ? "admin.html"
+                : "/manifest.webmanifest".equals(requestPath) ? "manifest.webmanifest"
+                : "/sw.js".equals(requestPath) ? "sw.js"
+                : "/icons/tls-chat.svg".equals(requestPath) ? "icons/tls-chat.svg" : "index.html";
+        String resource = "/web/" + resourceName;
+        try (InputStream page = ChatServer.class.getResourceAsStream(resource)) {
             if (page == null) {
                 writeJson(exchange, 500, "{\"error\":\"Web interface is unavailable\"}");
                 exchange.close();
@@ -569,7 +755,11 @@ public final class ChatServer implements AutoCloseable {
             }
             content = page.readAllBytes();
         }
-        exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
+        String contentType = resourceName.endsWith(".webmanifest") ? "application/manifest+json"
+                : resourceName.endsWith(".js") ? "application/javascript; charset=UTF-8"
+                : resourceName.endsWith(".svg") ? "image/svg+xml"
+                : "text/html; charset=UTF-8";
+        exchange.getResponseHeaders().set("Content-Type", contentType);
         exchange.sendResponseHeaders(200, content.length);
         try (OutputStream output = exchange.getResponseBody()) {
             output.write(content);
@@ -578,6 +768,17 @@ public final class ChatServer implements AutoCloseable {
 
     private void handlePhotos(HttpExchange exchange) throws IOException {
         try {
+            ChatRepository.UserAccount account;
+            try {
+                account = authenticatedUser(exchange);
+            } catch (SQLException e) {
+                writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+                return;
+            }
+            if (account == null) {
+                writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+                return;
+            }
             if (!"GET".equals(exchange.getRequestMethod())) {
                 writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
                 return;
@@ -675,6 +876,24 @@ public final class ChatServer implements AutoCloseable {
                 + ",\"url\":\"/api/files/" + escape(attachment.id()) + "\"}";
     }
 
+    private static String iceServersJson() {
+        String turnUrls = System.getenv().getOrDefault("TURN_URL", "").trim();
+        String turnUsername = System.getenv().getOrDefault("TURN_USERNAME", "").trim();
+        String turnCredential = System.getenv().getOrDefault("TURN_CREDENTIAL", "").trim();
+        StringBuilder json = new StringBuilder("{\"iceServers\":[{\"urls\":\"stun:stun.l.google.com:19302\"}");
+        if (!turnUrls.isBlank() && !turnUsername.isBlank() && !turnCredential.isBlank()) {
+            json.append(",{\"urls\":[");
+            String[] urls = turnUrls.split(",");
+            for (int i = 0; i < urls.length; i++) {
+                if (i > 0) json.append(',');
+                json.append('\"').append(escape(urls[i].trim())).append('\"');
+            }
+            json.append("],\"username\":\"").append(escape(turnUsername))
+                    .append("\",\"credential\":\"").append(escape(turnCredential)).append("\"}");
+        }
+        return json.append("]}").toString();
+    }
+
     private static String callJson(ChatRepository.Call call) {
         return "{\"id\":\"" + escape(call.id()) + "\",\"chatId\":\"" + escape(call.chatId())
                 + "\",\"caller\":\"" + escape(call.caller()) + "\",\"callee\":\""
@@ -698,6 +917,57 @@ public final class ChatServer implements AutoCloseable {
     private static String callsJson(List<ChatRepository.Call> calls) {
         return "[" + calls.stream().map(ChatServer::callJson)
                 .collect(Collectors.joining(",")) + "]";
+    }
+
+    private static String scheduledCallJson(ChatRepository.ScheduledCall call) {
+        return "{\"id\":\"" + escape(call.id()) + "\",\"chatId\":\"" + escape(call.chatId())
+                + "\",\"creator\":\"" + escape(call.creator()) + "\",\"callee\":\""
+                + escape(call.callee()) + "\",\"mediaType\":\"" + escape(call.mediaType())
+                + "\",\"scheduledAt\":\"" + call.scheduledAt() + "\",\"status\":\""
+                + escape(call.status()) + "\",\"createdAt\":\"" + call.createdAt() + "\"}";
+    }
+
+    private static String scheduledCallsJson(List<ChatRepository.ScheduledCall> calls) {
+        return "[" + calls.stream().map(ChatServer::scheduledCallJson)
+                .collect(Collectors.joining(",")) + "]";
+    }
+
+    private static String profileJson(ChatRepository.UserProfile profile) {
+        if (profile == null) return "null";
+        return "{\"username\":\"" + escape(profile.username()) + "\",\"displayName\":\""
+                + escape(profile.displayName()) + "\",\"profession\":\"" + escape(profile.profession())
+                + "\",\"workplace\":\"" + escape(profile.workplace()) + "\",\"region\":\""
+                + escape(profile.region()) + "\",\"phone\":\"" + escape(profile.phone())
+                + "\",\"permissions\":\"" + escape(profile.permissions()) + "\",\"about\":\""
+                + escape(profile.about()) + "\",\"presence\":\"" + escape(profile.presence())
+                + "\",\"lastSeen\":" + (profile.lastSeen() == null ? "null" : "\"" + profile.lastSeen() + "\"") + "}";
+    }
+
+    private static String notificationJson(ChatRepository.Notification notification) {
+        return "{\"id\":\"" + escape(notification.id()) + "\",\"recipient\":\""
+                + escape(notification.recipient()) + "\",\"title\":\"" + escape(notification.title())
+                + "\",\"body\":\"" + escape(notification.body()) + "\",\"severity\":\""
+                + escape(notification.severity()) + "\",\"createdBy\":\"" + escape(notification.createdBy())
+                + "\",\"createdAt\":\"" + notification.createdAt() + "\",\"read\":"
+                + notification.read() + "}";
+    }
+
+    private static String notificationsJson(List<ChatRepository.Notification> notifications) {
+        return "[" + notifications.stream().map(ChatServer::notificationJson)
+                .collect(Collectors.joining(",")) + "]";
+    }
+
+    private static String adminUserJson(ChatRepository.AdminUser user) {
+        return "{\"username\":\"" + escape(user.username()) + "\",\"displayName\":\""
+                + escape(user.displayName()) + "\",\"profession\":\"" + escape(user.profession())
+                + "\",\"workplace\":\"" + escape(user.workplace()) + "\",\"region\":\""
+                + escape(user.region()) + "\",\"permissions\":\"" + escape(user.permissions())
+                + "\",\"status\":\"" + escape(user.status()) + "\",\"about\":\""
+                + escape(user.about()) + "\",\"presence\":\"" + escape(user.presence()) + "\"}";
+    }
+
+    private static String adminUsersJson(List<ChatRepository.AdminUser> users) {
+        return "[" + users.stream().map(ChatServer::adminUserJson).collect(Collectors.joining(",")) + "]";
     }
 
     private static String queryValue(String rawQuery, String key) {
@@ -743,6 +1013,14 @@ public final class ChatServer implements AutoCloseable {
         return json.substring(start, end).replace("\\\"", "\"").replace("\\\\", "\\");
     }
 
+    private static String optionalJsonValue(String json, String key, String fallback) {
+        try {
+            return jsonValue(json, key);
+        } catch (IllegalArgumentException ignored) {
+            return fallback;
+        }
+    }
+
     private static String escape(String value) {
         if (value == null) {
             return "";
@@ -754,6 +1032,10 @@ public final class ChatServer implements AutoCloseable {
         byte[] content = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        if (status == 204) {
+            exchange.sendResponseHeaders(status, -1);
+            return;
+        }
         exchange.sendResponseHeaders(status, content.length);
         try (OutputStream output = exchange.getResponseBody()) {
             output.write(content);
@@ -762,7 +1044,11 @@ public final class ChatServer implements AutoCloseable {
 
     @Override
     public void close() {
+        if (webSocketServer != null) {
+            webSocketServer.close();
+        }
         server.stop(0);
+        attachmentStorage.close();
         try {
             repository.close();
         } catch (SQLException e) {
@@ -776,8 +1062,16 @@ public final class ChatServer implements AutoCloseable {
                 : Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
         Path database = Path.of(args.length > 1 ? args[1] : "tls-chat.db");
         ChatServer chatServer = new ChatServer(port, database);
-        Runtime.getRuntime().addShutdownHook(new Thread(chatServer::close));
+        CountDownLatch shutdown = new CountDownLatch(1);
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                chatServer.close();
+            } finally {
+                shutdown.countDown();
+            }
+        }));
         chatServer.start();
         System.out.println("TLS Chat server started: http://localhost:" + chatServer.port());
+        shutdown.await();
     }
 }

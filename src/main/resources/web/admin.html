@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TLS Chat — администрирование</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0a0d14; --panel:#141a26; --line:#2b3650; --text:#d6deeb; --accent:#39ff88; --danger:#ff5f7a; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:14px system-ui,sans-serif; }
+    main { max-width:1400px; margin:auto; padding:24px; } h1,h2 { color:var(--accent); } h1 { margin-top:0; }
+    .panel { background:var(--panel); border:1px solid var(--line); padding:16px; margin:16px 0; border-radius:6px; }
+    form { display:grid; gap:8px; } input,select,textarea,button { font:inherit; padding:8px; border:1px solid var(--line); border-radius:4px; background:#0d1320; color:var(--text); }
+    button { cursor:pointer; background:#183d2a; color:var(--accent); } button.danger { color:#fff; background:#572333; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
+    table { width:100%; border-collapse:collapse; } th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:8px; }
+    td input { width:100%; min-width:180px; } .muted { color:#7d8aa6; } .error { color:var(--danger); } #app { display:none; }
+    @media (max-width:700px) { main { padding:12px; } table { display:block; overflow:auto; white-space:nowrap; } }
+  </style>
+</head>
+<body>
+<main>
+  <section id="loginPanel" class="panel">
+    <h1>TLS Chat / Admin</h1>
+    <form id="loginForm">
+      <input id="adminUsername" required placeholder="Логин администратора">
+      <input id="adminPassword" required type="password" placeholder="Пароль">
+      <button>Войти</button>
+      <div id="loginStatus" class="error"></div>
+    </form>
+  </section>
+
+  <section id="app">
+    <div class="panel"><button id="logout" class="danger">Выйти</button><span id="status" class="muted"></span></div>
+    <div class="grid">
+      <section class="panel">
+        <h2>Создать или изменить чат</h2>
+        <form id="chatForm">
+          <input id="chatId" required pattern="[A-Za-z0-9_-]{2,64}" placeholder="ID чата">
+          <input id="chatType" required value="group" placeholder="Тип: group/support/direct">
+          <input id="chatName" required placeholder="Название">
+          <input id="chatColor" required value="c-blue" placeholder="Цвет/класс">
+          <input id="professionRule" placeholder="Правило профессии">
+          <input id="workplaceRule" placeholder="Правило подразделения">
+          <input id="regionRule" placeholder="Правило региона">
+          <input id="writePermissions" placeholder="Права записи через запятую">
+          <button>Сохранить чат</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>Экстренное уведомление</h2>
+        <form id="notificationForm">
+          <input id="recipient" placeholder="Логин получателя; пусто — всем">
+          <input id="notificationTitle" required maxlength="160" placeholder="Заголовок">
+          <textarea id="notificationBody" required maxlength="4000" rows="5" placeholder="Текст"></textarea>
+          <select id="severity"><option value="info">Информация</option><option value="warning">Предупреждение</option><option value="emergency">Экстренное</option></select>
+          <input id="expiresAt" type="datetime-local" title="Необязательно">
+          <button>Отправить уведомление</button>
+        </form>
+      </section>
+    </div>
+
+    <section class="panel"><h2>Пользователи</h2><button id="refreshUsers">Обновить</button><div id="users"></div></section>
+    <section class="panel"><h2>Заявки на регистрацию</h2><button id="refreshRegistrations">Обновить</button><div id="registrations"></div></section>
+    <section class="panel"><h2>Чаты</h2><button id="refreshChats">Обновить</button><div id="chats"></div></section>
+    <section class="panel"><h2>GitHub-коммиты</h2><button id="refreshCommits">Обновить</button><div id="commits"></div><form id="commentForm" style="margin-top:10px"><input id="commitSha" required placeholder="SHA коммита"><textarea id="commitComment" required maxlength="4000" rows="3" placeholder="Ответить на коммит"></textarea><button>Опубликовать комментарий</button></form></section>
+  </section>
+</main>
+<script>
+  let token = localStorage.getItem("tlsChatAdminToken") || "";
+  const $ = id => document.getElementById(id);
+  const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const headers = (extra = {}) => token ? {...extra, Authorization:`Bearer ${token}`} : extra;
+  async function api(path, options = {}) {
+    const response = await fetch(path, {...options, headers:headers(options.headers || {})});
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    return body;
+  }
+  function showApp() { $("loginPanel").style.display="none"; $("app").style.display="block"; loadAll(); }
+  async function loadUsers() {
+    const users = await api("/api/admin/users");
+    $("users").innerHTML = `<table><thead><tr><th>Сотрудник</th><th>Статус</th><th>Присутствие</th><th>Права</th><th></th></tr></thead><tbody>` + users.map(u =>
+      `<tr data-user="${esc(u.username)}"><td><b>${esc(u.displayName)}</b><br><span class="muted">${esc(u.username)} · ${esc(u.profession)} · ${esc(u.workplace)}</span></td>`+
+      `<td><select class="user-status"><option ${u.status === "APPROVED" ? "selected" : ""}>APPROVED</option><option ${u.status === "SUSPENDED" ? "selected" : ""}>SUSPENDED</option></select></td>`+
+      `<td>${esc(u.presence)}</td><td><input class="user-permissions" value="${esc(u.permissions)}"><input class="user-password" type="password" placeholder="Новый пароль (необязательно)"></td><td><button class="save-user">Сохранить</button></td></tr>`).join("") + `</tbody></table>`;
+    document.querySelectorAll(".save-user").forEach(button => button.onclick = async () => {
+      const row = button.closest("tr");
+      try { await api(`/api/admin/users/${encodeURIComponent(row.dataset.user)}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({status:row.querySelector(".user-status").value, permissions:row.querySelector(".user-permissions").value, temporaryPassword:row.querySelector(".user-password").value})}); $("status").textContent="Пользователь сохранён"; }
+      catch (e) { $("status").textContent=e.message; }
+    });
+  }
+  async function loadChats() {
+    const chats = await api("/api/admin/chats");
+    $("chats").innerHTML = `<table><thead><tr><th>ID</th><th>Название</th><th>Тип</th><th>Правила</th><th>Права записи</th></tr></thead><tbody>` + chats.map(c =>
+      `<tr><td>${esc(c.id)}</td><td>${esc(c.name)}</td><td>${esc(c.type)}</td><td>${esc(c.professionRule)} / ${esc(c.workplaceRule)} / ${esc(c.regionRule)}</td><td>${esc(c.writePermissions)}</td></tr>`).join("") + `</tbody></table>`;
+  }
+  async function loadRegistrations() {
+    const requests = await api("/api/admin/registrations");
+    $("registrations").innerHTML = requests.length ? `<table><thead><tr><th>Заявитель</th><th>Доступ</th><th></th></tr></thead><tbody>` + requests.map(r =>
+      `<tr data-request="${esc(r.id)}"><td><b>${esc(r.fullName)}</b><br><span class="muted">${esc(r.profession)} · ${esc(r.workplace)} · ${esc(r.region)} · ${esc(r.phone)}</span></td>`+
+      `<td><input class="request-username" placeholder="Логин"><input class="request-password" type="password" placeholder="Временный пароль"><input class="request-permissions" placeholder="Права"></td>`+
+      `<td><button class="approve-request">Одобрить</button> <button class="reject-request danger">Отклонить</button></td></tr>`).join("") + `</tbody></table>` : `<span class="muted">Новых заявок нет</span>`;
+    document.querySelectorAll(".approve-request,.reject-request").forEach(button => button.onclick = async () => {
+      const row = button.closest("tr"), approve = button.classList.contains("approve-request");
+      const values = {status:approve ? "APPROVED" : "REJECTED", username:row.querySelector(".request-username").value, password:row.querySelector(".request-password").value, permissions:row.querySelector(".request-permissions").value};
+      try { await api(`/api/admin/registrations/${encodeURIComponent(row.dataset.request)}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(values)}); $("status").textContent="Заявка обработана"; await Promise.all([loadRegistrations(),loadUsers()]); }
+      catch(e) { $("status").textContent=e.message; }
+    });
+  }
+  async function loadAll() { try { await Promise.all([loadUsers(),loadChats(),loadRegistrations(),loadCommits()]); } catch(e) { $("status").textContent=e.message; } }
+  async function loadCommits() {
+    try {
+      const commits = await api("/api/admin/github/commits");
+      $("commits").innerHTML = commits.map(commit => `<div style="border-bottom:1px solid var(--line);padding:8px 0"><b>${esc(commit.sha.slice(0,8))}</b> ${esc((commit.commit && commit.commit.message || "").split("\\n")[0])}<br><span class="muted">${esc(commit.author && (commit.author.login || commit.author.name) || "unknown")}</span> <button class="select-commit" data-sha="${esc(commit.sha)}">Ответить</button></div>`).join("");
+      document.querySelectorAll(".select-commit").forEach(button => button.onclick = () => $("commitSha").value = button.dataset.sha);
+    } catch (e) { $("commits").innerHTML = `<span class="muted">${esc(e.message)}. Задайте GITHUB_REPOSITORY и GITHUB_TOKEN.</span>`; }
+  }
+  $("commentForm").onsubmit = async event => { event.preventDefault(); try { await api(`/api/admin/github/commits/${encodeURIComponent($("commitSha").value)}/comments`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body:$("commitComment").value})}); $("status").textContent="Комментарий опубликован"; $("commitComment").value=""; } catch(e) { $("status").textContent=e.message; } };
+  $("loginForm").onsubmit = async event => { event.preventDefault(); try { const result=await api("/api/admin/login", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:$("adminUsername").value,password:$("adminPassword").value})}); token=result.token; localStorage.setItem("tlsChatAdminToken",token); showApp(); } catch(e) { $("loginStatus").textContent=e.message; } };
+  $("logout").onclick = () => { token=""; localStorage.removeItem("tlsChatAdminToken"); $("app").style.display="none"; $("loginPanel").style.display="block"; };
+  $("refreshUsers").onclick = loadUsers; $("refreshChats").onclick = loadChats; $("refreshRegistrations").onclick = loadRegistrations; $("refreshCommits").onclick = loadCommits;
+  $("chatForm").onsubmit = async event => { event.preventDefault(); try { await api("/api/admin/chats", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:$("chatId").value,type:$("chatType").value,name:$("chatName").value,color:$("chatColor").value,professionRule:$("professionRule").value,workplaceRule:$("workplaceRule").value,regionRule:$("regionRule").value,writePermissions:$("writePermissions").value})}); $("status").textContent="Чат сохранён"; await loadChats(); } catch(e) { $("status").textContent=e.message; } };
+  $("notificationForm").onsubmit = async event => { event.preventDefault(); try { const raw=$("expiresAt").value; await api("/api/admin/notifications", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({recipient:$("recipient").value,title:$("notificationTitle").value,body:$("notificationBody").value,severity:$("severity").value,expiresAt:raw ? new Date(raw).toISOString() : ""})}); $("status").textContent="Уведомление отправлено"; event.target.reset(); } catch(e) { $("status").textContent=e.message; } };
+  if (token) showApp();
+</script>
+</body>
+</html>

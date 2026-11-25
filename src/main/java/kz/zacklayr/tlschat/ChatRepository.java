@@ -26,7 +26,10 @@ public final class ChatRepository implements AutoCloseable {
     private static final long SESSION_DAYS = 30;
     private static final Set<String> ALLOWED_PERMISSIONS = Set.of(
             "ceo", "department_lead", "global_write", "regional_write",
-            "support_agent", "hidden_data", "manage_users", "manage_chats"
+            "support_agent", "hidden_data", "manage_users", "manage_chats",
+            "engine_lead", "integration_lead", "porting_lead", "support_lead",
+            "cybersecurity_lead", "language_lead", "equipment_lead", "wellbeing_lead",
+            "design_lead", "game_design_lead", "scenario_lead", "sound_lead"
     );
 
     private final String normalizedJdbcUrl;
@@ -325,13 +328,15 @@ public final class ChatRepository implements AutoCloseable {
     public synchronized List<ChatSummary> findChats() throws SQLException {
         List<ChatSummary> chats = new ArrayList<>();
         try (PreparedStatement statement = conn().prepareStatement(
-                "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count " +
+                "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count, " +
+                        "(SELECT COUNT(*) FROM chat_members cm_online JOIN users u ON u.username = cm_online.username " +
+                        "WHERE cm_online.chat_id = c.id AND u.status = 'APPROVED' AND u.presence = 'online') AS online_count " +
                         "FROM chats c ORDER BY c.type, c.name");
              ResultSet result = statement.executeQuery()) {
             while (result.next()) {
                 chats.add(new ChatSummary(result.getString("id"), result.getString("type"),
                         result.getString("name"), result.getString("color"), result.getInt("members"),
-                        result.getInt("online"), result.getInt("message_count")));
+                        result.getInt("online_count"), result.getInt("message_count")));
             }
         }
         return chats;
@@ -341,6 +346,8 @@ public final class ChatRepository implements AutoCloseable {
         List<ChatSummary> chats = new ArrayList<>();
         try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT c.*, (SELECT COUNT(*) FROM chat_members cm2 WHERE cm2.chat_id = c.id) AS member_count, " +
+                        "(SELECT COUNT(*) FROM chat_members cm_online JOIN users u ON u.username = cm_online.username " +
+                        "WHERE cm_online.chat_id = c.id AND u.status = 'APPROVED' AND u.presence = 'online') AS online_count, " +
                         "(SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count " +
                         "FROM chats c JOIN chat_members cm ON cm.chat_id = c.id AND cm.username = ? " +
                         "ORDER BY c.type, c.name")) {
@@ -350,7 +357,7 @@ public final class ChatRepository implements AutoCloseable {
                     boolean writable = canWrite(result.getString("write_permissions"), user.permissions());
                     chats.add(new ChatSummary(result.getString("id"), result.getString("type"),
                             result.getString("name"), result.getString("color"), result.getInt("member_count"),
-                            result.getInt("online"), result.getInt("message_count"), writable));
+                            result.getInt("online_count"), result.getInt("message_count"), writable));
                 }
             }
         }
@@ -487,7 +494,7 @@ public final class ChatRepository implements AutoCloseable {
                 String userPerms = userResult.getString("permissions");
                 Set<String> permsSet = (userPerms == null || userPerms.isBlank())
                         ? Set.of()
-                        : Set.of(userPerms.split(","));
+                        : new HashSet<>(Arrays.asList(userPerms.split(",")));
 
                 try (Statement stmt = conn().createStatement();
                      ResultSet chatResult = stmt.executeQuery(
@@ -523,17 +530,76 @@ public final class ChatRepository implements AutoCloseable {
     public synchronized List<ChatDefinition> adminChats() throws SQLException {
         List<ChatDefinition> chats = new ArrayList<>();
         try (PreparedStatement statement = conn().prepareStatement(
-                "SELECT id, type, name, color, profession_rule, workplace_rule, write_permissions " +
+                "SELECT id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions " +
                         "FROM chats ORDER BY name");
              ResultSet result = statement.executeQuery()) {
             while (result.next()) {
                 chats.add(new ChatDefinition(result.getString("id"), result.getString("type"),
                         result.getString("name"), result.getString("color"),
                         result.getString("profession_rule"), result.getString("workplace_rule"),
-                        result.getString("write_permissions")));
+                        result.getString("region_rule"), result.getString("write_permissions")));
             }
         }
         return chats;
+    }
+
+    public synchronized List<AdminUser> adminUsers() throws SQLException {
+        List<AdminUser> users = new ArrayList<>();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT username, display_name, profession, workplace, region, permissions, status, about, presence, last_seen " +
+                        "FROM users ORDER BY display_name");
+             ResultSet result = statement.executeQuery()) {
+            while (result.next()) {
+                String lastSeen = result.getString("last_seen");
+                users.add(new AdminUser(result.getString("username"), result.getString("display_name"),
+                        result.getString("profession"), result.getString("workplace"), result.getString("region"),
+                        result.getString("permissions"), result.getString("status"), result.getString("about"),
+                        result.getString("presence"), lastSeen == null || lastSeen.isBlank() ? null : Instant.parse(lastSeen)));
+            }
+        }
+        return users;
+    }
+
+    public synchronized AdminUser updateUserAccess(String username, String status, String permissions)
+            throws SQLException {
+        return updateUserAccess(username, status, permissions, null);
+    }
+
+    public synchronized AdminUser updateUserAccess(String username, String status, String permissions,
+                                                    String temporaryPassword) throws SQLException {
+        if (!Set.of("APPROVED", "SUSPENDED").contains(status)) {
+            throw new IllegalArgumentException("User status must be APPROVED or SUSPENDED");
+        }
+        String normalizedPermissions = normalizePermissions(permissions);
+        String normalizedUsername = username == null ? "" : username.toLowerCase(Locale.ROOT);
+        if (temporaryPassword != null && !temporaryPassword.isBlank()
+                && (temporaryPassword.length() < 8 || temporaryPassword.length() > 128)) {
+            throw new IllegalArgumentException("Temporary password must contain 8..128 characters");
+        }
+        String sql = temporaryPassword == null || temporaryPassword.isBlank()
+                ? "UPDATE users SET status = ?, permissions = ? WHERE username = ?"
+                : "UPDATE users SET status = ?, permissions = ?, password_salt = ?, password_hash = ? WHERE username = ?";
+        try (PreparedStatement statement = conn().prepareStatement(sql)) {
+            statement.setString(1, status);
+            statement.setString(2, normalizedPermissions);
+            int usernameIndex = 3;
+            if (temporaryPassword != null && !temporaryPassword.isBlank()) {
+                PasswordHasher.PasswordHash passwordHash = PasswordHasher.hash(temporaryPassword.toCharArray());
+                statement.setString(3, passwordHash.salt());
+                statement.setString(4, passwordHash.hash());
+                usernameIndex = 5;
+            }
+            statement.setString(usernameIndex, normalizedUsername);
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalArgumentException("User not found");
+            }
+        }
+        for (AdminUser user : adminUsers()) {
+            if (user.username().equals(normalizedUsername)) {
+                return user;
+            }
+        }
+        throw new IllegalArgumentException("User not found");
     }
 
     private boolean isMember(String chatId, String username) throws SQLException {
@@ -1463,6 +1529,11 @@ public final class ChatRepository implements AutoCloseable {
 
     public record UserAccount(String username, String displayName, String profession,
                               String workplace, String region, String phone, String permissions) {
+    }
+
+    public record AdminUser(String username, String displayName, String profession,
+                            String workplace, String region, String permissions, String status,
+                            String about, String presence, Instant lastSeen) {
     }
 
     public record Session(String token, String role, String username, Instant expiresAt) {

@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0a0d14">
 <link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0a0d14">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>TLS Chat v1.0</title>
 <style>
   :root {
@@ -286,6 +289,7 @@
         <input class="search" id="search" placeholder="Поиск чатов…">
         <select class="search" id="ceoUser" style="display:none" title="Начать личный чат"></select>
         <button class="btn" id="startDirect" style="display:none" title="Написать сотруднику">DM</button>
+        <button class="btn" id="profileBtn" style="display:none">Профиль</button>
         <button class="btn" id="logout" style="display:none">Выйти</button>
       </div>
       <div class="folders">
@@ -378,6 +382,29 @@
   </div>
 </div>
 
+<div id="profileModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+  <div class="modal-window">
+    <div class="modal-title"><span>Профиль и звонки</span><span class="modal-close" id="closeProfile">×</span></div>
+    <div class="modal-body">
+      <form id="profileForm" style="display:grid;gap:6px">
+        <input id="profileDisplayName" disabled>
+        <textarea id="profileAbout" maxlength="2000" rows="4" placeholder="О себе"></textarea>
+        <select id="profilePresence"><option value="online">В сети</option><option value="away">Отошёл</option><option value="busy">Занят</option><option value="dnd">Не беспокоить</option></select>
+        <button class="btn primary">Сохранить профиль</button>
+      </form>
+      <h3>Запланировать звонок</h3>
+      <form id="scheduleForm" style="display:grid;gap:6px">
+        <select id="scheduleChat"></select>
+        <select id="scheduleType"><option value="audio">Аудио</option><option value="video">Видео</option></select>
+        <input id="scheduleAt" type="datetime-local" required>
+        <button class="btn">Запланировать</button>
+      </form>
+      <h3>История звонков</h3><div id="callHistory"></div>
+      <h3>Запланированные</h3><div id="scheduledCalls"></div>
+    </div>
+  </div>
+</div>
+
 <div id="seenModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)this.style.display='none'">
   <div class="modal-window">
     <div class="modal-title">
@@ -402,6 +429,7 @@
   let activeCall = null;
   let callPollTimer = null;
   let incomingCallId = null;
+  let realtimeSocket = null;
   let filter = "all";
   const $ = id => document.getElementById(id);
   const esc = s => s.replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -462,6 +490,35 @@
     const response = await fetch(`/api/chats/${encodeURIComponent(chat.id)}`, { headers: authHeaders() });
     if (!response.ok) throw new Error("Не удалось загрузить историю чата");
     chat.msgs = await response.json();
+  }
+
+  function subscribeRealtime(chatId) {
+    if (realtimeSocket && realtimeSocket.readyState === WebSocket.OPEN) {
+      realtimeSocket.send(JSON.stringify({ type: "subscribe", chatId }));
+    }
+  }
+
+  function connectRealtime() {
+    if (!authToken || !window.WebSocket || realtimeSocket) return;
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    try {
+      realtimeSocket = new WebSocket(`${protocol}://${location.host}/ws/?token=${encodeURIComponent(authToken)}`);
+      realtimeSocket.onopen = () => { if (current) subscribeRealtime(current); };
+      realtimeSocket.onmessage = event => {
+        let packet;
+        try { packet = JSON.parse(event.data); } catch (_) { return; }
+        if (packet.type !== "message" || !packet.chatId || !packet.message) return;
+        const chat = chats.find(item => item.id === packet.chatId);
+        if (!chat || chat.msgs.some(message => message.id === packet.message.id)) return;
+        chat.msgs.push(packet.message);
+        if (current === chat.id) renderConv();
+        renderChats();
+      };
+      realtimeSocket.onclose = () => { realtimeSocket = null; };
+      realtimeSocket.onerror = () => { realtimeSocket.close(); };
+    } catch (_) {
+      realtimeSocket = null;
+    }
   }
 
   function visibleChats() {
@@ -578,6 +635,7 @@
     if (!c) return;
     c.unread = 0;
     await loadMessages(c);
+    subscribeRealtime(c.id);
     renderChats();
     renderConv();
   }
@@ -586,6 +644,13 @@
     const text = $("input").value.trim();
     if (!text || !current) return;
     const c = chats.find(x => x.id === current);
+    if (realtimeSocket && realtimeSocket.readyState === WebSocket.OPEN
+        && c.id !== "marsel-cat" && c.id !== "helpdesk") {
+      realtimeSocket.send(JSON.stringify({ type: "message", chatId: c.id, text }));
+      $("input").value = "";
+      $("typing").textContent = "";
+      return;
+    }
     const response = await fetch(`/api/chats/${encodeURIComponent(c.id)}/messages`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
@@ -621,7 +686,12 @@
   async function beginCall(call, initiator) {
     const wantsVideo = call.mediaType === "video";
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: wantsVideo });
-    const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    let iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+    try {
+      const iceResponse = await fetch("/api/calls/ice-servers", { headers: authHeaders() });
+      if (iceResponse.ok) iceServers = (await iceResponse.json()).iceServers || iceServers;
+    } catch (_) { /* public STUN remains a usable fallback */ }
+    const peer = new RTCPeerConnection({ iceServers });
     activeCall = { ...call, peer, stream, lastEvent: 0 };
     $("callModal").style.display = "flex";
     $("callTitle").textContent = wantsVideo ? "Видеозвонок" : "Аудиозвонок";
@@ -790,6 +860,51 @@
     return authToken ? { ...headers, Authorization: `Bearer ${authToken}` } : headers;
   }
 
+  async function checkNotifications() {
+    if (!authToken) return;
+    const response = await fetch("/api/notifications", { headers: authHeaders() });
+    if (!response.ok) return;
+    const notifications = await response.json();
+    for (const notification of notifications.filter(item => !item.read)) {
+      const prefix = notification.severity === "emergency" ? "ЭКСТРЕННО: "
+        : notification.severity === "warning" ? "Внимание: " : "";
+      window.alert(`${prefix}${notification.title}\n\n${notification.body}`);
+      await fetch(`/api/notifications/${encodeURIComponent(notification.id)}/read`, {
+        method: "POST", headers: authHeaders()
+      });
+    }
+  }
+
+  async function openProfile() {
+    const profile = await (await fetch("/api/profile", { headers: authHeaders() })).json();
+    $("profileDisplayName").value = `${profile.displayName} · ${profile.profession}`;
+    $("profileAbout").value = profile.about || "";
+    $("profilePresence").value = profile.presence || "online";
+    const directChats = chats.filter(chat => chat.type === "direct");
+    $("scheduleChat").innerHTML = directChats.length
+      ? directChats.map(chat => `<option value="${esc(chat.id)}">${esc(chat.name)}</option>`).join("")
+      : `<option value="">Сначала откройте личный чат</option>`;
+    const historyResponse = await fetch("/api/calls/history?limit=50", { headers: authHeaders() });
+    const history = historyResponse.ok ? await historyResponse.json() : [];
+    $("callHistory").innerHTML = history.length ? history.map(call =>
+      `<div>${esc(call.mediaType)} · ${esc(call.status)} · ${fmtTime(call.createdAt)} · ${esc(call.caller)} → ${esc(call.callee)}</div>`).join("")
+      : `<span style="color:var(--faint)">История пуста</span>`;
+    await refreshScheduledCalls();
+    $("profileModal").style.display = "flex";
+  }
+
+  async function refreshScheduledCalls() {
+    const response = await fetch("/api/calls/scheduled", { headers: authHeaders() });
+    const calls = response.ok ? await response.json() : [];
+    $("scheduledCalls").innerHTML = calls.length ? calls.map(call =>
+      `<div style="display:flex;gap:8px;align-items:center;margin:4px 0"><span>${esc(call.mediaType)} · ${new Date(call.scheduledAt).toLocaleString()} · ${esc(call.callee)}</span><button class="btn cancel-scheduled" data-id="${esc(call.id)}">Отменить</button></div>`).join("")
+      : `<span style="color:var(--faint)">Нет запланированных звонков</span>`;
+    document.querySelectorAll(".cancel-scheduled").forEach(button => button.onclick = async () => {
+      await fetch(`/api/calls/scheduled/${encodeURIComponent(button.dataset.id)}`, { method:"POST", headers:authHeaders() });
+      await refreshScheduledCalls();
+    });
+  }
+
   $("login").addEventListener("submit", async e => {
     e.preventDefault();
     const status = $("loginStatus");
@@ -811,11 +926,42 @@
     currentUser = result;
     localStorage.setItem("tlsChatToken", authToken);
     localStorage.setItem("tlsChatUser", JSON.stringify(result));
+    connectRealtime();
     $("whoami").textContent = `${result.displayName} · ${result.profession}`;
     $("empty").style.display = "none";
     await loadChats();
     await loadCeoUsers();
+    await checkNotifications();
+    $("profileBtn").style.display = "block";
     $("logout").style.display = "block";
+  });
+
+  $("profileBtn").addEventListener("click", openProfile);
+  $("closeProfile").addEventListener("click", () => $("profileModal").style.display = "none");
+  $("profileForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const response = await fetch("/api/profile", {
+      method: "PUT", headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ about: $("profileAbout").value, presence: $("profilePresence").value })
+    });
+    $("typing").textContent = response.ok ? "Профиль сохранён" : "Не удалось сохранить профиль";
+  });
+  $("scheduleForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const chatId = $("scheduleChat").value;
+    const peerResponse = await fetch(`/api/chats/${encodeURIComponent(chatId)}/peer`, { headers: authHeaders() });
+    const peer = await peerResponse.json();
+    const response = await fetch("/api/calls/scheduled", {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ chatId, username: peer.username, mediaType: $("scheduleType").value,
+        scheduledAt: new Date($("scheduleAt").value).toISOString() })
+    });
+    if (!response.ok) {
+      $("typing").textContent = (await response.json().catch(() => ({}))).error || "Не удалось запланировать звонок";
+      return;
+    }
+    $("scheduleAt").value = "";
+    await refreshScheduledCalls();
   });
 
   $("logout").addEventListener("click", async () => {
@@ -824,11 +970,14 @@
     } finally {
       authToken = null;
       currentUser = null;
+      if (realtimeSocket) realtimeSocket.close();
+      realtimeSocket = null;
       localStorage.removeItem("tlsChatToken");
       localStorage.removeItem("tlsChatUser");
       chats = [];
       current = null;
       $("logout").style.display = "none";
+      $("profileBtn").style.display = "none";
       $("whoami").textContent = "регистрация не выполнена";
       $("conv").style.display = "none";
       $("empty").style.display = "block";
@@ -839,7 +988,9 @@
   if (authToken && currentUser) {
     $("whoami").textContent = `${currentUser.displayName} · ${currentUser.profession}`;
     $("logout").style.display = "block";
-    loadChats().then(loadCeoUsers).catch(() => {
+    $("profileBtn").style.display = "block";
+    connectRealtime();
+    loadChats().then(loadCeoUsers).then(checkNotifications).catch(() => {
       localStorage.removeItem("tlsChatToken");
       localStorage.removeItem("tlsChatUser");
       authToken = null;
@@ -881,6 +1032,7 @@
     }
   }, 2500);
   setInterval(checkIncomingCalls, 2500);
+  setInterval(checkNotifications, 10000);
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});

@@ -17,6 +17,7 @@ services:
     build: .
     environment:
       PORT: 8080
+      WS_PORT: 8081
       DATABASE_URL: postgresql://tlschat:change-this-in-production@postgres:5432/tlschat
       FILE_STORAGE_DIR: /app/uploads
     volumes:

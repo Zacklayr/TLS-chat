@@ -30,6 +30,16 @@
       <artifactId>postgresql</artifactId>
       <version>42.7.5</version>
     </dependency>
+    <dependency>
+      <groupId>org.java-websocket</groupId>
+      <artifactId>Java-WebSocket</artifactId>
+      <version>1.5.7</version>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <version>2.31.64</version>
+    </dependency>
   </dependencies>
 
   <build>
@@ -88,6 +98,25 @@
             <goals>
               <goal>single</goal>
             </goals>
+          </execution>
+          <execution>
+            <id>desktop-client-jar</id>
+            <phase>package</phase>
+            <goals>
+              <goal>single</goal>
+            </goals>
+            <configuration>
+              <archive>
+                <manifest>
+                  <mainClass>kz.zacklayr.tlschat.DesktopClientApp</mainClass>
+                </manifest>
+              </archive>
+              <descriptorRefs>
+                <descriptorRef>jar-with-dependencies</descriptorRef>
+              </descriptorRefs>
+              <finalName>tls-chat-desktop</finalName>
+              <appendAssemblyId>true</appendAssemblyId>
+            </configuration>
           </execution>
         </executions>
       </plugin>

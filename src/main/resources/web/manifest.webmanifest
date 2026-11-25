@@ -6,5 +6,8 @@
   "display": "standalone",
   "background_color": "#0a0d14",
   "theme_color": "#0a0d14",
+  "icons": [
+    { "src": "/icons/tls-chat.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ],
   "description": "Закрытый корпоративный мессенджер TLS Chat"
 }
