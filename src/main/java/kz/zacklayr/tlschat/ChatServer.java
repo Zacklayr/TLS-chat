@@ -746,7 +746,7 @@ public final class ChatServer implements AutoCloseable {
                 writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
                 return;
             }
-            writeJson(exchange, 200, usersJson(repository.approvedUsers()));
+            writeJson(exchange, 200, usersJson(repository.approvedUsers(), hasPermission(account, "hidden_data")));
         } catch (IllegalArgumentException e) {
             writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
         } catch (SQLException e) {
@@ -892,11 +892,12 @@ public final class ChatServer implements AutoCloseable {
                 .collect(java.util.stream.Collectors.joining(",")) + "]";
     }
 
-    private static String usersJson(List<ChatRepository.UserAccount> users) {
+    private static String usersJson(List<ChatRepository.UserAccount> users, boolean includeHiddenData) {
         return "[" + users.stream().map(user -> "{\"username\":\"" + escape(user.username()) +
                 "\",\"displayName\":\"" + escape(user.displayName()) + "\",\"profession\":\"" +
                 escape(user.profession()) + "\",\"workplace\":\"" + escape(user.workplace()) +
-                "\",\"region\":\"" + escape(user.region()) + "\"}")
+                "\",\"region\":\"" + escape(user.region()) +
+                (includeHiddenData ? ",\"phone\":\"" + escape(user.phone()) + "\"" : "") + "}")
                 .collect(java.util.stream.Collectors.joining(",")) + "]";
     }
 

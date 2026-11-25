@@ -9,6 +9,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ChatServerTest {
@@ -87,6 +88,12 @@ class ChatServerTest {
                             .header("Authorization", "Bearer " + token).GET().build(), HttpResponse.BodyHandlers.ofString());
             assertEquals(200, profile.statusCode());
             assertTrue(profile.body().contains("employee"));
+
+            HttpResponse<String> directory = client.send(HttpRequest.newBuilder(URI.create(base + "/api/users"))
+                            .header("Authorization", "Bearer " + token).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, directory.statusCode());
+            assertTrue(directory.body().contains("employee"));
+            assertFalse(directory.body().contains("+70000000000"));
 
             HttpResponse<String> message = client.send(HttpRequest.newBuilder(URI.create(base + "/api/chats/general/messages"))
                             .header("Authorization", "Bearer " + token)
