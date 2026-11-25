@@ -36,7 +36,9 @@ class ChatWebSocketServerTest {
             try {
                 CountDownLatch subscribed = new CountDownLatch(1);
                 CountDownLatch received = new CountDownLatch(1);
+                CountDownLatch notificationReceived = new CountDownLatch(1);
                 AtomicReference<String> receivedMessage = new AtomicReference<>("");
+                AtomicReference<String> receivedNotification = new AtomicReference<>("");
                 WebSocketClient client = new WebSocketClient(
                         URI.create("ws://127.0.0.1:" + server.getPort() + "/?token=" + token)) {
                     @Override
@@ -53,6 +55,10 @@ class ChatWebSocketServerTest {
                             receivedMessage.set(message);
                             received.countDown();
                         }
+                        if (message.contains("Realtime emergency")) {
+                            receivedNotification.set(message);
+                            notificationReceived.countDown();
+                        }
                     }
 
                     @Override
@@ -68,6 +74,10 @@ class ChatWebSocketServerTest {
                 client.send("{\"type\":\"message\",\"chatId\":\"ws-chat\",\"text\":\"Realtime hello\"}");
                 assertTrue(received.await(5, TimeUnit.SECONDS));
                 assertTrue(receivedMessage.get().contains("Realtime hello"));
+                server.broadcastNotification(repository.createNotification(
+                        "", "Alert", "Realtime emergency", "emergency", "admin", null));
+                assertTrue(notificationReceived.await(5, TimeUnit.SECONDS));
+                assertTrue(receivedNotification.get().contains("\"type\":\"notification\""));
                 client.closeBlocking();
             } finally {
                 server.close();

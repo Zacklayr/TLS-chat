@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -219,6 +220,11 @@ class ChatRepositoryTest {
             ChatRepository.Call call = repository.createCall(direct.id(), "ceo", "employee", "video");
             repository.addCallEvent(call.id(), "ceo", "offer", "{\"sdp\":\"test-offer\"}");
             assertEquals(1, repository.findCallEvents(call.id(), "employee", 0).size());
+            ChatRepository.Call missedCall = repository.createCall(direct.id(), "ceo", "employee", "audio");
+            repository.expireStaleCallsAt(Instant.now().plus(3, ChronoUnit.MINUTES));
+            assertEquals("MISSED", repository.findCall(missedCall.id()).status());
+            assertThrows(IllegalArgumentException.class,
+                    () -> repository.addCallEvent(missedCall.id(), "employee", "accept", ""));
             repository.addMessage(direct.id(), "ceo", ceo.permissions(), "Important message");
             assertEquals(1, repository.findMessages(direct.id(), "employee").size());
         }

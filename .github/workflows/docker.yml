@@ -1,0 +1,19 @@
+name: TLS-Chat Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build --tag tls-chat:${{ github.sha }} .
+      - name: Inspect image metadata
+        run: docker image inspect tls-chat:${{ github.sha }} --format '{{.Config.Entrypoint}} {{.Config.Env}}'

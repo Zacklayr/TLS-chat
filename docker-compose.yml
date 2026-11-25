@@ -20,6 +20,20 @@ services:
       WS_PORT: 8081
       DATABASE_URL: postgresql://tlschat:change-this-in-production@postgres:5432/tlschat
       FILE_STORAGE_DIR: /app/uploads
+      FILE_STORAGE_MODE: ${FILE_STORAGE_MODE:-local}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_PREFIX: ${S3_PREFIX:-tls-chat/}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      TURN_URL: ${TURN_URL:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_CREDENTIAL: ${TURN_CREDENTIAL:-}
+      REGISTRAR_USERNAME: ${REGISTRAR_USERNAME:-}
+      REGISTRAR_PASSWORD: ${REGISTRAR_PASSWORD:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     volumes:
       - uploads-data:/app/uploads
     depends_on:

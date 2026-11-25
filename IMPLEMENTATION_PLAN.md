@@ -45,7 +45,11 @@ Only features that compile, have tests where practical, and are exercised throug
 - Added a separate `DesktopClientApp` employee client foundation with login, accessible-chat listing, message history, sending, and periodic refresh over the shared REST API.
 - Added a packaged desktop-client JAR target for the employee desktop client.
 - Added a native Android project foundation under `clients/android` with login, chat listing, message history, and message sending over the shared REST API; Android SDK/Gradle are unavailable in this environment, so its APK is not yet built here.
+- Extended the Android client and packaged desktop client with shared call-history viewing and scheduled audio-call actions; native media capture still belongs to the external client milestone.
+- Added attachment upload controls to both Android and desktop clients using the authenticated `POST /api/files` contract and the shared 25 MB safety limit; successful uploads are posted into chat history as downloadable links.
 - Added `.github/workflows/android.yml` so GitHub CI builds the Android debug APK with a provisioned Android SDK.
+- Added `.github/workflows/docker.yml` so every main-branch push and pull request builds the deployable backend image and inspects its runtime metadata.
+- Extended Docker Compose with environment-driven S3, TURN, registrar, admin, and credential settings; secrets remain outside the repository.
 - Added an in-process HTTP integration flow covering employee approval, login, bearer authentication, profile access, and chat listing.
 - Expanded the HTTP integration flow to cover message sending, file upload/download, and session revocation; corrected empty `204` response framing.
 - Added `infra/smoke-test.ps1` for post-deployment checks against Heroku or another HTTPS host.
@@ -53,14 +57,17 @@ Only features that compile, have tests where practical, and are exercised throug
 - Added profile/about and presence state, notification delivery/read state, call history, and scheduled call REST contracts.
 - Added protected web admin panel at `/admin` with user status/permission management, temporary password reset, registration approval, chat upsert management, and emergency notification publishing.
 - Added authenticated WebSocket transport (`WS_PORT`) for chat subscriptions, realtime messages, presence, ping/pong, and REST fallback compatibility; Docker/Nginx now routes `/ws/` to it.
+- Added realtime WebSocket push for broadcast and targeted admin notifications; REST polling remains the fallback for Heroku/direct deployments.
+- Added stale-call cleanup: unanswered ringing calls become `MISSED` after two minutes and reject late signaling events; repository coverage verifies the lifecycle.
 - Connected stored presence to live chat member counts and exposed profile editing, call history, and scheduled-call controls in the web client.
 - Added server-side GitHub commit browsing and commit comments for administrators, with the repository and token kept in `GITHUB_REPOSITORY`/`GITHUB_TOKEN` environment variables.
 - Added authenticated ICE-server configuration for browser calls; optional TURN credentials are supplied only through `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` environment variables.
 - Protected Marsel photo delivery with the same authenticated-session boundary as the rest of the private application.
 - Added `EncryptedBackupApp` and `infra/backup.ps1` for AES-256-GCM backups of SQLite/uploads/photos or encrypted `pg_dump` input, with the key supplied only through `BACKUP_ENCRYPTION_KEY`.
-- Verified `mvn verify`: 16 tests passed and the runtime health endpoint integration test passed.
-- Expanded verification to 18 passing tests, including a real WebSocket client round-trip, encrypted-backup round-trip, profile, notification, scheduled-call, admin-access, admin-page, and PWA-resource coverage.
+- Verified `mvn verify`: 20 tests passed, including the runtime health endpoint and authenticated message/file/session integration flow.
+- Verification includes a real WebSocket client round-trip, encrypted-backup round-trip, profile, notification, scheduled-call, admin-access, admin-page, PWA-resource, and attachment-storage coverage.
 - Heroku remains suitable for the stateless web/API process and Heroku Postgres, but uploaded files must move to object storage before production because the dyno filesystem is ephemeral.
 - Added an S3-compatible attachment storage adapter; local disk remains the development default, while Heroku can use `FILE_STORAGE_MODE=s3` with bucket/region/prefix environment configuration.
+- Added browser-side media compression before upload (images to 1920px JPEG; supported videos to 1280px WebM with automatic original-file fallback) and an offline mini-game fallback available from the login shell.
 
 The browser call flow is now wired to the signaling API, but it still requires two-client end-to-end testing and production TURN configuration. Docker Compose configuration is present but Docker is not installed in the current environment, so the container stack has not been executed here. Android and desktop call flows still require their clients.

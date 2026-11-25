@@ -579,6 +579,9 @@ public final class ChatServer implements AutoCloseable {
                         recipient, jsonValue(body, "title"), jsonValue(body, "body"),
                         jsonValue(body, "severity"), "admin", expiresAt);
                 writeJson(exchange, 201, notificationJson(notification));
+                if (webSocketServer != null) {
+                    webSocketServer.broadcastNotification(notification);
+                }
                 return;
             }
             if ("/api/admin/github/commits".equals(path) && "GET".equals(exchange.getRequestMethod())) {

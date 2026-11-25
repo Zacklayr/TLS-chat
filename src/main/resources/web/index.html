@@ -306,6 +306,7 @@
         <div>
           <div class="big">TLS CHAT</div>
           <div>Регистрация обязательна для доступа</div>
+          <button class="btn" id="offlineGameBtn" type="button" style="margin-top:12px">Офлайн-режим</button>
           <form id="registration" style="display:grid;gap:6px;max-width:260px;margin:14px auto 0">
             <input class="search" id="fullName" required maxlength="120" placeholder="ФИО">
             <input class="search" id="profession" required maxlength="80" placeholder="Профессия">
@@ -358,6 +359,7 @@
         <div class="typing" id="typing"></div>
         <div class="composer">
           <span class="clip" id="attach" title="Вложение">📎</span>
+          <label class="hide-m" title="Compress images and videos before upload"><input id="compressImage" type="checkbox" checked> compress media</label>
           <input id="fileInput" type="file" hidden>
           <textarea id="input" rows="1" placeholder="Сообщение… (Enter — отправить)"></textarea>
           <button class="btn primary" id="send">Отправить</button>
@@ -379,6 +381,17 @@
     <video id="remoteVideo" autoplay playsinline></video>
     <video id="localVideo" autoplay muted playsinline></video>
     <div class="modal-body"><button class="btn" id="endCall">Завершить</button><small id="callStatus"></small></div>
+  </div>
+</div>
+
+<div id="offlineGameModal" class="modal-overlay" style="display:none">
+  <div class="modal-window" style="max-width:520px">
+    <div class="modal-title"><span>Офлайн-режим</span><span class="modal-close" id="closeOfflineGame">×</span></div>
+    <div class="modal-body">
+      <small>Связь недоступна. Можно дождаться сети или сыграть: пробел/клик — прыжок.</small>
+      <canvas id="offlineGame" width="480" height="160" style="width:100%;margin-top:10px;background:#101820;border:1px solid var(--line);border-radius:6px"></canvas>
+      <div style="display:flex;justify-content:space-between;margin-top:6px"><small id="offlineScore">Счёт: 0</small><button class="btn" id="restartOfflineGame" type="button">Заново</button></div>
+    </div>
   </div>
 </div>
 
@@ -507,6 +520,16 @@
       realtimeSocket.onmessage = event => {
         let packet;
         try { packet = JSON.parse(event.data); } catch (_) { return; }
+        if (packet.type === "notification" && packet.notification) {
+          const notification = packet.notification;
+          const prefix = notification.severity === "emergency" ? "ЭКСТРЕННО: "
+            : notification.severity === "warning" ? "Внимание: " : "";
+          window.alert(`${prefix}${notification.title}\n\n${notification.body}`);
+          if (notification.id) fetch(`/api/notifications/${encodeURIComponent(notification.id)}/read`, {
+            method: "POST", headers: authHeaders()
+          }).catch(() => {});
+          return;
+        }
         if (packet.type !== "message" || !packet.chatId || !packet.message) return;
         const chat = chats.find(item => item.id === packet.chatId);
         if (!chat || chat.msgs.some(message => message.id === packet.message.id)) return;
@@ -811,9 +834,76 @@
   $("endCall").addEventListener("click", () => endCall(true));
   $("closeCall").addEventListener("click", () => endCall(true));
   $("attach").addEventListener("click", () => $("fileInput").click());
+  async function prepareVideoUpload(file) {
+    if (!file.type.startsWith("video/") || typeof MediaRecorder === "undefined") return file;
+    const video = document.createElement("video");
+    const url = URL.createObjectURL(file);
+    video.src = url; video.muted = true; video.playsInline = true;
+    try {
+      await new Promise((resolve, reject) => {
+        video.onloadedmetadata = resolve;
+        video.onerror = reject;
+        video.load();
+      });
+      if (typeof video.captureStream !== "function") return file;
+      const maxSide = 1280;
+      const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      const context = canvas.getContext("2d");
+      const sourceStream = video.captureStream();
+      const canvasStream = canvas.captureStream(30);
+      sourceStream.getAudioTracks().forEach(track => canvasStream.addTrack(track));
+      const mimeType = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
+        .find(type => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(canvasStream, mimeType ? { mimeType } : undefined);
+      const chunks = [];
+      recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      const recording = new Promise(resolve => {
+        recorder.onstop = () => resolve(chunks.length ? new Blob(chunks, { type: recorder.mimeType || "video/webm" }) : null);
+      });
+      const draw = () => {
+        if (!video.paused && !video.ended) { context.drawImage(video, 0, 0, canvas.width, canvas.height); requestAnimationFrame(draw); }
+      };
+      recorder.start(250);
+      video.onended = () => recorder.stop();
+      await video.play();
+      draw();
+      const blob = await recording;
+      if (!blob || blob.size >= file.size) return file;
+      const name = file.name.replace(/\.[^.]+$/, "") + ".webm";
+      return new File([blob], name, { type: blob.type, lastModified: Date.now() });
+    } catch (_) {
+      return file;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  async function prepareUpload(file) {
+    if ($("compressImage").checked && file.type.startsWith("video/")) return prepareVideoUpload(file);
+    if (!$("compressImage").checked || !file.type.startsWith("image/") || typeof createImageBitmap !== "function") return file;
+    try {
+      const bitmap = await createImageBitmap(file);
+      const maxSide = 1920;
+      const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close();
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.82));
+      if (!blob || blob.size >= file.size) return file;
+      const name = file.name.replace(/\.[^.]+$/, "") + ".jpg";
+      return new File([blob], name, { type: "image/jpeg", lastModified: Date.now() });
+    } catch (_) {
+      return file;
+    }
+  }
   $("fileInput").addEventListener("change", async () => {
-    const file = $("fileInput").files[0];
-    if (!file || !current) return;
+    const selectedFile = $("fileInput").files[0];
+    if (!selectedFile || !current) return;
+    const file = await prepareUpload(selectedFile);
     const chat = chats.find(x => x.id === current);
     const response = await fetch(`/api/files?chatId=${encodeURIComponent(chat.id)}`, {
       method: "POST",
@@ -1016,6 +1106,47 @@
     }
     $("seenModal").style.display = "flex";
   };
+
+  const offlineGame = { running: false, raf: 0, score: 0, playerY: 132, velocity: 0, obstacleX: 480 };
+  function drawOfflineGame() {
+    const canvas = $("offlineGame");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#101820"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = "#31505d"; ctx.beginPath(); ctx.moveTo(0, 144); ctx.lineTo(canvas.width, 144); ctx.stroke();
+    ctx.fillStyle = "#55d6a8"; ctx.fillRect(36, offlineGame.playerY, 18, 12);
+    ctx.fillStyle = "#ff8f70"; ctx.fillRect(offlineGame.obstacleX, 132, 14, 12);
+    $("offlineScore").textContent = `Счёт: ${offlineGame.score}`;
+  }
+  function jumpOfflineGame() {
+    if (!offlineGame.running) return;
+    if (offlineGame.playerY >= 132) offlineGame.velocity = -9;
+  }
+  function tickOfflineGame() {
+    if (!offlineGame.running) return;
+    offlineGame.velocity += 0.45;
+    offlineGame.playerY = Math.min(132, offlineGame.playerY + offlineGame.velocity);
+    offlineGame.obstacleX -= 4;
+    if (offlineGame.obstacleX < -20) { offlineGame.obstacleX = 480; offlineGame.score += 1; }
+    if (offlineGame.obstacleX < 58 && offlineGame.obstacleX > 25 && offlineGame.playerY > 116) {
+      offlineGame.running = false;
+      $("offlineScore").textContent = `Игра окончена · счёт: ${offlineGame.score}`;
+    }
+    drawOfflineGame();
+    offlineGame.raf = requestAnimationFrame(tickOfflineGame);
+  }
+  function startOfflineGame() {
+    cancelAnimationFrame(offlineGame.raf);
+    offlineGame.running = true; offlineGame.score = 0; offlineGame.playerY = 132; offlineGame.velocity = 0; offlineGame.obstacleX = 480;
+    tickOfflineGame();
+  }
+  $("offlineGameBtn").addEventListener("click", () => { $("offlineGameModal").style.display = "flex"; startOfflineGame(); });
+  $("closeOfflineGame").addEventListener("click", () => { offlineGame.running = false; $("offlineGameModal").style.display = "none"; });
+  $("restartOfflineGame").addEventListener("click", startOfflineGame);
+  $("offlineGame").addEventListener("pointerdown", jumpOfflineGame);
+  window.addEventListener("keydown", event => { if (event.code === "Space" && $("offlineGameModal").style.display === "flex") { event.preventDefault(); jumpOfflineGame(); } });
+  drawOfflineGame();
 
   // Автоматическое обновление открытого чата и списка
   setInterval(async () => {

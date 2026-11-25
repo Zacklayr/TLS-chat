@@ -24,6 +24,12 @@ class ChatServerTest {
             assertEquals(200, response.statusCode());
             assertTrue(response.body().contains("\"status\":\"ok\""));
 
+            HttpResponse<String> webPage = HttpClient.newHttpClient().send(
+                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, webPage.statusCode());
+            assertTrue(webPage.body().contains("compressImage"));
+
             HttpResponse<String> adminPage = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/admin")).GET().build(),
                     HttpResponse.BodyHandlers.ofString());

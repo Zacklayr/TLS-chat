@@ -107,6 +107,20 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
         });
     }
 
+    public void broadcastNotification(ChatRepository.Notification notification) {
+        String recipient = notification.recipient() == null ? "" : notification.recipient();
+        String payload = "{\"type\":\"notification\",\"notification\":{\"id\":\""
+                + escape(notification.id()) + "\",\"recipient\":\"" + escape(recipient)
+                + "\",\"title\":\"" + escape(notification.title()) + "\",\"body\":\""
+                + escape(notification.body()) + "\",\"severity\":\"" + escape(notification.severity())
+                + "\",\"createdAt\":\"" + notification.createdAt() + "\"}}";
+        users.forEach((connection, username) -> {
+            if ((recipient.isBlank() || recipient.equals(username)) && connection.isOpen()) {
+                connection.send(payload);
+            }
+        });
+    }
+
     private void broadcastPresence(String username, String presence) {
         String payload = "{\"type\":\"presence\",\"username\":\"" + escape(username)
                 + "\",\"presence\":\"" + escape(presence) + "\"}";

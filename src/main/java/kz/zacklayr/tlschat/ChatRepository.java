@@ -729,6 +729,7 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     public synchronized List<Call> findIncomingCalls(String username) throws SQLException {
+        expireStaleCalls();
         List<Call> calls = new ArrayList<>();
         try (PreparedStatement statement = conn().prepareStatement(
                 "SELECT id, chat_id, caller, callee, media_type, status, created_at, ended_at " +
@@ -744,6 +745,7 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     public synchronized List<Call> findCallHistory(String username, int limit) throws SQLException {
+        expireStaleCalls();
         List<Call> calls = new ArrayList<>();
         int safeLimit = Math.max(1, Math.min(limit, 100));
         try (PreparedStatement statement = conn().prepareStatement(
@@ -972,9 +974,13 @@ public final class ChatRepository implements AutoCloseable {
 
     public synchronized CallEvent addCallEvent(String callId, String sender, String eventType, String payload)
             throws SQLException {
+        expireStaleCalls();
         Call call = findCall(callId);
         if (call == null || (!sender.equals(call.caller()) && !sender.equals(call.callee()))) {
             throw new IllegalArgumentException("Call is not available");
+        }
+        if (Set.of("MISSED", "REJECTED", "ENDED").contains(call.status())) {
+            throw new IllegalArgumentException("Call is no longer active");
         }
         if (!Set.of("offer", "answer", "candidate", "accept", "reject", "end").contains(eventType)) {
             throw new IllegalArgumentException("Unsupported call event");
@@ -1016,6 +1022,20 @@ public final class ChatRepository implements AutoCloseable {
             }
         }
         return new CallEvent(eventId, callId, sender, eventType, payload == null ? "" : payload, createdAt);
+    }
+
+    public synchronized void expireStaleCalls() throws SQLException {
+        expireStaleCallsAt(Instant.now());
+    }
+
+    void expireStaleCallsAt(Instant now) throws SQLException {
+        Instant cutoff = now.minus(2, ChronoUnit.MINUTES);
+        try (PreparedStatement statement = conn().prepareStatement(
+                "UPDATE calls SET status = 'MISSED', ended_at = ? WHERE status = 'RINGING' AND created_at < ?")) {
+            statement.setString(1, now.toString());
+            statement.setString(2, cutoff.toString());
+            statement.executeUpdate();
+        }
     }
 
     public synchronized List<CallEvent> findCallEvents(String callId, String username, long afterId)

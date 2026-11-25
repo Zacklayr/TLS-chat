@@ -3,6 +3,7 @@ package kz.zacklayr.tlschat;
 import javax.swing.BorderFactory;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
+import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JList;
@@ -21,7 +22,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Timer;
@@ -102,13 +107,24 @@ public final class DesktopClientApp {
         messages.setWrapStyleWord(true);
         composer = new JTextField();
         JButton send = new JButton("Send");
+        JButton attach = new JButton("Attach");
+        JButton callHistory = new JButton("Call history");
+        JButton scheduleCall = new JButton("Schedule call");
         send.addActionListener(event -> sendMessage());
         composer.addActionListener(event -> sendMessage());
+        attach.addActionListener(event -> uploadAttachment(frame));
+        callHistory.addActionListener(event -> loadCallHistory());
+        scheduleCall.addActionListener(event -> scheduleCall());
         status = new JLabel("Connected");
         JPanel bottom = new JPanel(new BorderLayout(6, 6));
         bottom.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
         bottom.add(composer, BorderLayout.CENTER);
-        bottom.add(send, BorderLayout.EAST);
+        JPanel actions = new JPanel(new GridLayout(1, 4, 6, 0));
+        actions.add(send);
+        actions.add(attach);
+        actions.add(callHistory);
+        actions.add(scheduleCall);
+        bottom.add(actions, BorderLayout.EAST);
         JPanel right = new JPanel(new BorderLayout());
         right.add(new JScrollPane(messages), BorderLayout.CENTER);
         right.add(bottom, BorderLayout.SOUTH);
@@ -183,6 +199,56 @@ public final class DesktopClientApp {
         }
     }
 
+    private void uploadAttachment(JFrame parent) {
+        ChatItem chat = chatList.getSelectedValue();
+        if (chat == null) return;
+        JFileChooser chooser = new JFileChooser();
+        if (chooser.showOpenDialog(parent) != JFileChooser.APPROVE_OPTION) return;
+        Path file = chooser.getSelectedFile().toPath();
+        try {
+            long size = Files.size(file);
+            if (size > 25L * 1024 * 1024) throw new IllegalArgumentException("Maximum file size is 25 MB");
+            byte[] bytes = Files.readAllBytes(file);
+            String contentType = Files.probeContentType(file);
+            if (contentType == null || contentType.isBlank()) contentType = "application/octet-stream";
+            String response = requestBytes("POST", "/api/files?chatId=" + encode(chat.id()), bytes,
+                    token, file.getFileName().toString(), contentType);
+            String url = jsonValue(response, "url");
+            String name = jsonValue(response, "name");
+            request("POST", "/api/chats/" + encode(chat.id()) + "/messages",
+                    "{\"text\":\"[file:" + escape(url) + "|" + escape(name) + "]\"}", token);
+            status.setText("Uploaded: " + name);
+        } catch (Exception e) {
+            showError(e);
+        }
+    }
+
+    private void loadCallHistory() {
+        try {
+            String response = request("GET", "/api/calls/history?limit=20", null, token);
+            messages.setText(formatCalls(response));
+        } catch (Exception e) {
+            showError(e);
+        }
+    }
+
+    private void scheduleCall() {
+        ChatItem chat = chatList.getSelectedValue();
+        if (chat == null) return;
+        try {
+            String peerResponse = request("GET", "/api/chats/" + encode(chat.id()) + "/peer", null, token);
+            String peer = jsonValue(peerResponse, "username");
+            String body = "{\"chatId\":\"" + escape(chat.id()) +
+                    "\",\"username\":\"" + escape(peer) +
+                    "\",\"mediaType\":\"audio\",\"scheduledAt\":\"" +
+                    Instant.now().plus(10, ChronoUnit.MINUTES) + "\"}";
+            request("POST", "/api/calls/scheduled", body, token);
+            status.setText("Call scheduled for 10 minutes from now");
+        } catch (Exception e) {
+            status.setText("Scheduling is available for direct chats only");
+        }
+    }
+
     private String request(String method, String path, String body, String authorization) throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(serverUrl + path))
                 .header("Content-Type", "application/json");
@@ -190,6 +256,20 @@ public final class DesktopClientApp {
         HttpRequest request = builder.method(method, body == null
                 ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body)).build();
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw new IllegalStateException("HTTP " + response.statusCode());
+        }
+        return response.body();
+    }
+
+    private String requestBytes(String method, String path, byte[] body, String authorization,
+                                String filename, String contentType) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(serverUrl + path))
+                .header("Content-Type", contentType)
+                .header("X-Filename", filename);
+        if (authorization != null) builder.header("Authorization", "Bearer " + authorization);
+        HttpResponse<String> response = http.send(builder.method(method, HttpRequest.BodyPublishers.ofByteArray(body)).build(),
+                HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IllegalStateException("HTTP " + response.statusCode());
         }
@@ -209,6 +289,16 @@ public final class DesktopClientApp {
         for (String object : objects(json)) {
             result.append(jsonValue(object, "name")).append(": ")
                     .append(jsonValue(object, "text")).append('\n');
+        }
+        return result.toString();
+    }
+
+    private static String formatCalls(String json) {
+        StringBuilder result = new StringBuilder("Call history:\n");
+        for (String object : objects(json)) {
+            result.append(jsonValue(object, "mediaType")).append(" · ")
+                    .append(jsonValue(object, "status")).append(" · ")
+                    .append(jsonValue(object, "createdAt")).append('\n');
         }
         return result.toString();
     }
