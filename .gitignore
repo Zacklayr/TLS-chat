@@ -1,5 +1,7 @@
 # Сборка
 target/
+uploads/
+runtime-test.db
 
 # Сертификаты и хранилища ключей 
 *.p12

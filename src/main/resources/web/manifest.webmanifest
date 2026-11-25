@@ -1,0 +1,10 @@
+{
+  "name": "TLS Chat",
+  "short_name": "TLS Chat",
+  "lang": "ru",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0d14",
+  "theme_color": "#0a0d14",
+  "description": "Закрытый корпоративный мессенджер TLS Chat"
+}

@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -207,8 +208,16 @@ class ChatRepositoryTest {
             ChatRepository.UserAccount ceo = repository.authenticate("ceo", "secure-pass");
             String token = repository.createSession("USER", ceo.username());
             assertEquals(ceo.username(), repository.findSession(token).username());
+            repository.deleteSession(token);
+            assertNull(repository.findSession(token));
 
             ChatRepository.ChatDefinition direct = repository.ensureDirectChat(ceo, "employee");
+            ChatRepository.Attachment attachment = repository.createAttachment(
+                    direct.id(), "ceo", "design.pdf", "stored-design.pdf", "application/pdf", 128);
+            assertEquals("design.pdf", repository.findAttachment(attachment.id()).originalName());
+            ChatRepository.Call call = repository.createCall(direct.id(), "ceo", "employee", "video");
+            repository.addCallEvent(call.id(), "ceo", "offer", "{\"sdp\":\"test-offer\"}");
+            assertEquals(1, repository.findCallEvents(call.id(), "employee", 0).size());
             repository.addMessage(direct.id(), "ceo", ceo.permissions(), "Important message");
             assertEquals(1, repository.findMessages(direct.id(), "employee").size());
         }

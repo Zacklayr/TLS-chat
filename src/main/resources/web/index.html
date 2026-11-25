@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0d14">
+<link rel="manifest" href="/manifest.webmanifest">
 <title>TLS Chat v1.0</title>
 <style>
   :root {
@@ -158,6 +160,8 @@
   .chat-head .title { color: var(--accent-2); font-weight: bold; }
   .chat-head .status { color: var(--muted); font-size: 11px; }
   .chat-head .status.on { color: var(--accent); }
+  .call-actions { display: flex; gap: 4px; }
+  .call-actions .btn { padding: 3px 7px; }
 
   .feed {
     flex: 1; overflow-y: auto; padding: 10px 12px;
@@ -258,6 +262,9 @@
   }
   .modal-close { cursor: pointer; padding: 0 4px; font-size: 14px; }
   .modal-body { padding: 10px; overflow-y: auto; max-height: 60vh; font-size: 12px; }
+  .call-window { width: min(720px, 92vw); max-width: 92vw; }
+  .call-window video { width: 100%; max-height: 52vh; background: #000; object-fit: contain; }
+  .call-window #localVideo { max-height: 22vh; margin-top: 6px; }
   .seen-user-item { padding: 5px 6px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 </style>
 </head>
@@ -279,6 +286,7 @@
         <input class="search" id="search" placeholder="Поиск чатов…">
         <select class="search" id="ceoUser" style="display:none" title="Начать личный чат"></select>
         <button class="btn" id="startDirect" style="display:none" title="Написать сотруднику">DM</button>
+        <button class="btn" id="logout" style="display:none">Выйти</button>
       </div>
       <div class="folders">
         <button class="on" data-f="all">Все</button>
@@ -337,11 +345,16 @@
             <div class="title" id="hTitle"></div>
             <div class="status" id="hStatus"></div>
           </div>
+          <div class="call-actions" id="callActions" style="display:none">
+            <button class="btn" id="audioCall" title="Аудиозвонок">☎</button>
+            <button class="btn" id="videoCall" title="Видеозвонок">▣</button>
+          </div>
         </div>
         <div class="feed" id="feed"></div>
         <div class="typing" id="typing"></div>
         <div class="composer">
-          <span class="clip" title="Вложение">📎</span>
+          <span class="clip" id="attach" title="Вложение">📎</span>
+          <input id="fileInput" type="file" hidden>
           <textarea id="input" rows="1" placeholder="Сообщение… (Enter — отправить)"></textarea>
           <button class="btn primary" id="send">Отправить</button>
         </div>
@@ -353,6 +366,15 @@
     <span class="ok">● TLS 1.3 · защищённое соединение</span>
     <span class="spacer"></span>
     <span class="hide-m" id="whoami">регистрация не выполнена</span>
+  </div>
+</div>
+
+<div id="callModal" class="modal-overlay" style="display:none">
+  <div class="modal-window call-window">
+    <div class="modal-title"><span id="callTitle">Звонок</span><span class="modal-close" id="closeCall">×</span></div>
+    <video id="remoteVideo" autoplay playsinline></video>
+    <video id="localVideo" autoplay muted playsinline></video>
+    <div class="modal-body"><button class="btn" id="endCall">Завершить</button><small id="callStatus"></small></div>
   </div>
 </div>
 
@@ -377,6 +399,9 @@
   }
 
   let current = null;
+  let activeCall = null;
+  let callPollTimer = null;
+  let incomingCallId = null;
   let filter = "all";
   const $ = id => document.getElementById(id);
   const esc = s => s.replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -486,6 +511,7 @@
     $("hStatus").textContent = c.type === "group"
       ? `${c.members} участников, ${c.online} в сети`
       : (c.online ? "в сети" : "был(а) недавно");
+    $("callActions").style.display = c.type === "direct" ? "flex" : "none";
 
     const canWrite = c.canWrite !== false;
     $("input").disabled = !canWrite;
@@ -509,6 +535,7 @@
 
       let text = esc(m.text).replace(/@(\w+)/g, '<span class="mention">@$1</span>');
       text = text.replace(/\[photo:(.+?)\]/g, '<a href="$1" target="_blank"><img class="chat-photo" src="$1" alt="Фото Марселя" title="Нажмите, чтобы открыть фото"></a>');
+      text = text.replace(/\[file:(.+?)\|(.+?)\]/g, '<a href="$1" target="_blank" rel="noreferrer">📎 $2</a>');
 
       const senderHeader = !isOut
         ? `<div class="sender-header">
@@ -582,6 +609,121 @@
     }
   }
 
+  async function postCallEvent(type, payload = "") {
+    if (!activeCall) return;
+    await fetch(`/api/calls/${encodeURIComponent(activeCall.id)}/events`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ type, payload })
+    });
+  }
+
+  async function beginCall(call, initiator) {
+    const wantsVideo = call.mediaType === "video";
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: wantsVideo });
+    const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    activeCall = { ...call, peer, stream, lastEvent: 0 };
+    $("callModal").style.display = "flex";
+    $("callTitle").textContent = wantsVideo ? "Видеозвонок" : "Аудиозвонок";
+    $("callStatus").textContent = initiator ? "Ожидание ответа…" : "Подключение…";
+    $("localVideo").srcObject = stream;
+    $("localVideo").style.display = wantsVideo ? "block" : "none";
+    stream.getTracks().forEach(track => peer.addTrack(track, stream));
+    peer.ontrack = event => { $("remoteVideo").srcObject = event.streams[0]; };
+    peer.onicecandidate = event => {
+      if (event.candidate) postCallEvent("candidate", JSON.stringify(event.candidate));
+    };
+    peer.onconnectionstatechange = () => {
+      if (["failed", "disconnected", "closed"].includes(peer.connectionState)) endCall(false);
+    };
+    if (initiator) {
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      await postCallEvent("offer", JSON.stringify(offer));
+    }
+    pollCallEvents();
+  }
+
+  async function startCall(mediaType) {
+    const chat = chats.find(x => x.id === current);
+    if (!chat || chat.type !== "direct" || activeCall) return;
+    const peerResponse = await fetch(`/api/chats/${encodeURIComponent(chat.id)}/peer`, { headers: authHeaders() });
+    const peerResult = await peerResponse.json();
+    if (!peerResponse.ok || !peerResult.username) {
+      $("typing").textContent = "Не удалось определить собеседника";
+      return;
+    }
+    const response = await fetch("/api/calls", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ chatId: chat.id, username: peerResult.username, mediaType })
+    });
+    const call = await response.json();
+    if (!response.ok) {
+      $("typing").textContent = call.error || "Не удалось начать звонок";
+      return;
+    }
+    try { await beginCall(call, true); }
+    catch (_) { $("typing").textContent = "Нет доступа к камере или микрофону"; }
+  }
+
+  async function pollCallEvents() {
+    if (!activeCall) return;
+    const response = await fetch(`/api/calls/${encodeURIComponent(activeCall.id)}/events?after=${activeCall.lastEvent}`, { headers: authHeaders() });
+    if (!response.ok) return;
+    const events = await response.json();
+    for (const event of events) {
+      activeCall.lastEvent = Math.max(activeCall.lastEvent, event.id);
+      if (event.sender === currentUser.username) continue;
+      if (event.type === "offer") {
+        await activeCall.peer.setRemoteDescription(JSON.parse(event.payload));
+        const answer = await activeCall.peer.createAnswer();
+        await activeCall.peer.setLocalDescription(answer);
+        await postCallEvent("answer", JSON.stringify(answer));
+        await postCallEvent("accept");
+        $("callStatus").textContent = "Соединение установлено";
+      } else if (event.type === "answer") {
+        await activeCall.peer.setRemoteDescription(JSON.parse(event.payload));
+        $("callStatus").textContent = "Соединение установлено";
+      } else if (event.type === "candidate") {
+        await activeCall.peer.addIceCandidate(JSON.parse(event.payload));
+      } else if (event.type === "reject" || event.type === "end") {
+        await endCall(false);
+        return;
+      }
+    }
+    if (activeCall) callPollTimer = setTimeout(pollCallEvents, 700);
+  }
+
+  async function endCall(notify = true) {
+    if (!activeCall) return;
+    if (notify) await postCallEvent("end");
+    activeCall.stream.getTracks().forEach(track => track.stop());
+    activeCall.peer.close();
+    activeCall = null;
+    clearTimeout(callPollTimer);
+    $("callModal").style.display = "none";
+    $("remoteVideo").srcObject = null;
+    $("localVideo").srcObject = null;
+  }
+
+  async function checkIncomingCalls() {
+    if (!authToken || activeCall || incomingCallId) return;
+    const response = await fetch("/api/calls/incoming", { headers: authHeaders() });
+    if (!response.ok) return;
+    const calls = await response.json();
+    const call = calls[0];
+    if (!call || call.id === incomingCallId) return;
+    incomingCallId = call.id;
+    if (window.confirm(`${call.caller} вызывает вас (${call.mediaType}). Принять?`)) {
+      try { await beginCall(call, false); }
+      catch (_) { await fetch(`/api/calls/${encodeURIComponent(call.id)}/events`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ type: "reject", payload: "" }) }); }
+    } else {
+      await fetch(`/api/calls/${encodeURIComponent(call.id)}/events`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ type: "reject", payload: "" }) });
+    }
+    incomingCallId = null;
+  }
+
   $("chats").addEventListener("click", e => {
     const item = e.target.closest(".chat-item");
     if (item) openChat(item.dataset.id);
@@ -594,6 +736,30 @@
   }));
   $("search").addEventListener("input", renderChats);
   $("send").addEventListener("click", send);
+  $("audioCall").addEventListener("click", () => startCall("audio"));
+  $("videoCall").addEventListener("click", () => startCall("video"));
+  $("endCall").addEventListener("click", () => endCall(true));
+  $("closeCall").addEventListener("click", () => endCall(true));
+  $("attach").addEventListener("click", () => $("fileInput").click());
+  $("fileInput").addEventListener("change", async () => {
+    const file = $("fileInput").files[0];
+    if (!file || !current) return;
+    const chat = chats.find(x => x.id === current);
+    const response = await fetch(`/api/files?chatId=${encodeURIComponent(chat.id)}`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": file.type || "application/octet-stream", "X-Filename": file.name }),
+      body: file
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      $("typing").textContent = result.error || "Не удалось загрузить файл";
+      $("fileInput").value = "";
+      return;
+    }
+    $("input").value = `[file:${result.url}|${result.name}]`;
+    await send();
+    $("fileInput").value = "";
+  });
   $("startDirect").addEventListener("click", startDirectChat);
   $("input").addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
@@ -649,10 +815,30 @@
     $("empty").style.display = "none";
     await loadChats();
     await loadCeoUsers();
+    $("logout").style.display = "block";
+  });
+
+  $("logout").addEventListener("click", async () => {
+    try {
+      await fetch("/api/logout", { method: "POST", headers: authHeaders() });
+    } finally {
+      authToken = null;
+      currentUser = null;
+      localStorage.removeItem("tlsChatToken");
+      localStorage.removeItem("tlsChatUser");
+      chats = [];
+      current = null;
+      $("logout").style.display = "none";
+      $("whoami").textContent = "регистрация не выполнена";
+      $("conv").style.display = "none";
+      $("empty").style.display = "block";
+      renderChats();
+    }
   });
 
   if (authToken && currentUser) {
     $("whoami").textContent = `${currentUser.displayName} · ${currentUser.profession}`;
+    $("logout").style.display = "block";
     loadChats().then(loadCeoUsers).catch(() => {
       localStorage.removeItem("tlsChatToken");
       localStorage.removeItem("tlsChatUser");
@@ -694,7 +880,12 @@
       }
     }
   }, 2500);
+  setInterval(checkIncomingCalls, 2500);
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
 
 </script>
 </body>
-</html> 
+</html>

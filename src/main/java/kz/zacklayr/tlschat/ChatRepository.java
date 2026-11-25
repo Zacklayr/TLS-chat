@@ -125,6 +125,9 @@ public final class ChatRepository implements AutoCloseable {
             ensureUserColumn(statement, "permissions", "TEXT NOT NULL DEFAULT ''");
             ensureUserColumn(statement, "password_salt", "TEXT NOT NULL DEFAULT ''");
             ensureUserColumn(statement, "password_hash", "TEXT NOT NULL DEFAULT ''");
+            ensureUserColumn(statement, "about", "TEXT NOT NULL DEFAULT ''");
+            ensureUserColumn(statement, "presence", "TEXT NOT NULL DEFAULT 'offline'");
+            ensureUserColumn(statement, "last_seen", "TEXT NOT NULL DEFAULT ''");
             ensureChatColumn(statement, "profession_rule", "TEXT NOT NULL DEFAULT ''");
             ensureChatColumn(statement, "workplace_rule", "TEXT NOT NULL DEFAULT ''");
             ensureChatColumn(statement, "region_rule", "TEXT NOT NULL DEFAULT ''");
@@ -164,6 +167,92 @@ public final class ChatRepository implements AutoCloseable {
                         username TEXT NOT NULL,
                         read_at TEXT NOT NULL,
                         PRIMARY KEY (message_id, username)
+                    )
+                    """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS attachments (
+                        id TEXT PRIMARY KEY,
+                        chat_id TEXT NOT NULL REFERENCES chats(id),
+                        uploader TEXT NOT NULL,
+                        original_name TEXT NOT NULL,
+                        stored_name TEXT NOT NULL,
+                        content_type TEXT NOT NULL,
+                        size BIGINT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """);
+            statement.executeUpdate(postgres ? """
+                    CREATE TABLE IF NOT EXISTS calls (
+                        id TEXT PRIMARY KEY,
+                        chat_id TEXT NOT NULL,
+                        caller TEXT NOT NULL,
+                        callee TEXT NOT NULL,
+                        media_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        ended_at TEXT NOT NULL DEFAULT ''
+                    )
+                    """ : """
+                    CREATE TABLE IF NOT EXISTS calls (
+                        id TEXT PRIMARY KEY,
+                        chat_id TEXT NOT NULL,
+                        caller TEXT NOT NULL,
+                        callee TEXT NOT NULL,
+                        media_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        ended_at TEXT NOT NULL DEFAULT ''
+                    )
+                    """);
+            statement.executeUpdate(postgres ? """
+                    CREATE TABLE IF NOT EXISTS call_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        call_id TEXT NOT NULL REFERENCES calls(id),
+                        sender TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """ : """
+                    CREATE TABLE IF NOT EXISTS call_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        call_id TEXT NOT NULL REFERENCES calls(id),
+                        sender TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS notifications (
+                        id TEXT PRIMARY KEY,
+                        recipient_username TEXT NOT NULL DEFAULT '',
+                        title TEXT NOT NULL,
+                        body TEXT NOT NULL,
+                        severity TEXT NOT NULL,
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL DEFAULT ''
+                    )
+                    """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS notification_reads (
+                        notification_id TEXT NOT NULL REFERENCES notifications(id),
+                        username TEXT NOT NULL,
+                        read_at TEXT NOT NULL,
+                        PRIMARY KEY (notification_id, username)
+                    )
+                    """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS scheduled_calls (
+                        id TEXT PRIMARY KEY,
+                        chat_id TEXT NOT NULL,
+                        creator TEXT NOT NULL,
+                        callee TEXT NOT NULL,
+                        media_type TEXT NOT NULL,
+                        scheduled_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL
                     )
                     """);
         }
@@ -458,6 +547,434 @@ public final class ChatRepository implements AutoCloseable {
         }
     }
 
+    public synchronized boolean isChatMember(String chatId, String username) throws SQLException {
+        return chatExists(chatId) && username != null && !username.isBlank()
+                && isMember(chatId, username);
+    }
+
+    public synchronized String findChatPeer(String chatId, String username) throws SQLException {
+        if (!isChatMember(chatId, username)) {
+            throw new IllegalArgumentException("Chat is not available");
+        }
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT username FROM chat_members WHERE chat_id = ? AND username <> ? ORDER BY username LIMIT 1")) {
+            statement.setString(1, chatId);
+            statement.setString(2, username);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getString("username") : "";
+            }
+        }
+    }
+
+    public synchronized Attachment createAttachment(String chatId, String uploader, String originalName,
+                                                     String storedName, String contentType, long size)
+            throws SQLException {
+        if (!isMember(chatId, uploader)) {
+            throw new IllegalArgumentException("Chat is not available");
+        }
+        if (originalName == null || originalName.isBlank() || storedName == null || storedName.isBlank()
+                || contentType == null || contentType.isBlank() || size < 0) {
+            throw new IllegalArgumentException("Invalid attachment metadata");
+        }
+        String id = java.util.UUID.randomUUID().toString();
+        Instant createdAt = Instant.now();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "INSERT INTO attachments(id, chat_id, uploader, original_name, stored_name, content_type, size, created_at) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
+            statement.setString(1, id);
+            statement.setString(2, chatId);
+            statement.setString(3, uploader);
+            statement.setString(4, originalName);
+            statement.setString(5, storedName);
+            statement.setString(6, contentType);
+            statement.setLong(7, size);
+            statement.setString(8, createdAt.toString());
+            statement.executeUpdate();
+        }
+        return new Attachment(id, chatId, uploader, originalName, storedName, contentType, size, createdAt);
+    }
+
+    public synchronized Attachment findAttachment(String id) throws SQLException {
+        if (id == null || id.isBlank()) {
+            return null;
+        }
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT id, chat_id, uploader, original_name, stored_name, content_type, size, created_at " +
+                        "FROM attachments WHERE id = ?")) {
+            statement.setString(1, id);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                return new Attachment(result.getString("id"), result.getString("chat_id"),
+                        result.getString("uploader"), result.getString("original_name"),
+                        result.getString("stored_name"), result.getString("content_type"),
+                        result.getLong("size"), Instant.parse(result.getString("created_at")));
+            }
+        }
+    }
+
+    public synchronized Call createCall(String chatId, String caller, String callee, String mediaType)
+            throws SQLException {
+        if (!isMember(chatId, caller) || !isMember(chatId, callee)) {
+            throw new IllegalArgumentException("Both call participants must belong to the chat");
+        }
+        if (!"audio".equals(mediaType) && !"video".equals(mediaType)) {
+            throw new IllegalArgumentException("Media type must be audio or video");
+        }
+        if (caller.equals(callee)) {
+            throw new IllegalArgumentException("You cannot call yourself");
+        }
+        String id = java.util.UUID.randomUUID().toString();
+        Instant createdAt = Instant.now();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "INSERT INTO calls(id, chat_id, caller, callee, media_type, status, created_at) " +
+                        "VALUES (?, ?, ?, ?, ?, 'RINGING', ?)")) {
+            statement.setString(1, id);
+            statement.setString(2, chatId);
+            statement.setString(3, caller);
+            statement.setString(4, callee);
+            statement.setString(5, mediaType);
+            statement.setString(6, createdAt.toString());
+            statement.executeUpdate();
+        }
+        return new Call(id, chatId, caller, callee, mediaType, "RINGING", createdAt, null);
+    }
+
+    public synchronized Call findCall(String id) throws SQLException {
+        if (id == null || id.isBlank()) {
+            return null;
+        }
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT id, chat_id, caller, callee, media_type, status, created_at, ended_at FROM calls WHERE id = ?")) {
+            statement.setString(1, id);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                String endedAt = result.getString("ended_at");
+                return new Call(result.getString("id"), result.getString("chat_id"),
+                        result.getString("caller"), result.getString("callee"),
+                        result.getString("media_type"), result.getString("status"),
+                        Instant.parse(result.getString("created_at")),
+                        endedAt == null || endedAt.isBlank() ? null : Instant.parse(endedAt));
+            }
+        }
+    }
+
+    public synchronized List<Call> findIncomingCalls(String username) throws SQLException {
+        List<Call> calls = new ArrayList<>();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT id, chat_id, caller, callee, media_type, status, created_at, ended_at " +
+                        "FROM calls WHERE callee = ? AND status = 'RINGING' ORDER BY created_at")) {
+            statement.setString(1, username);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    calls.add(callFrom(result));
+                }
+            }
+        }
+        return calls;
+    }
+
+    public synchronized List<Call> findCallHistory(String username, int limit) throws SQLException {
+        List<Call> calls = new ArrayList<>();
+        int safeLimit = Math.max(1, Math.min(limit, 100));
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT id, chat_id, caller, callee, media_type, status, created_at, ended_at " +
+                        "FROM calls WHERE caller = ? OR callee = ? ORDER BY created_at DESC LIMIT ?")) {
+            statement.setString(1, username);
+            statement.setString(2, username);
+            statement.setInt(3, safeLimit);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    calls.add(callFrom(result));
+                }
+            }
+        }
+        return calls;
+    }
+
+    public synchronized ScheduledCall scheduleCall(String chatId, String creator, String callee,
+                                                    String mediaType, Instant scheduledAt) throws SQLException {
+        if (!isMember(chatId, creator) || !isMember(chatId, callee)) {
+            throw new IllegalArgumentException("Both call participants must belong to the chat");
+        }
+        if (creator.equals(callee)) {
+            throw new IllegalArgumentException("You cannot schedule a call with yourself");
+        }
+        if (!"audio".equals(mediaType) && !"video".equals(mediaType)) {
+            throw new IllegalArgumentException("Media type must be audio or video");
+        }
+        if (scheduledAt == null || scheduledAt.isBefore(Instant.now())) {
+            throw new IllegalArgumentException("Scheduled time must be in the future");
+        }
+        String id = java.util.UUID.randomUUID().toString();
+        Instant createdAt = Instant.now();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "INSERT INTO scheduled_calls(id, chat_id, creator, callee, media_type, scheduled_at, status, created_at) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, 'SCHEDULED', ?)")) {
+            statement.setString(1, id);
+            statement.setString(2, chatId);
+            statement.setString(3, creator);
+            statement.setString(4, callee);
+            statement.setString(5, mediaType);
+            statement.setString(6, scheduledAt.toString());
+            statement.setString(7, createdAt.toString());
+            statement.executeUpdate();
+        }
+        return new ScheduledCall(id, chatId, creator, callee, mediaType, scheduledAt, "SCHEDULED", createdAt);
+    }
+
+    public synchronized List<ScheduledCall> findScheduledCalls(String username) throws SQLException {
+        List<ScheduledCall> calls = new ArrayList<>();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT id, chat_id, creator, callee, media_type, scheduled_at, status, created_at " +
+                        "FROM scheduled_calls WHERE (creator = ? OR callee = ?) AND status = 'SCHEDULED' " +
+                        "ORDER BY scheduled_at")) {
+            statement.setString(1, username);
+            statement.setString(2, username);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    calls.add(scheduledCallFrom(result));
+                }
+            }
+        }
+        return calls;
+    }
+
+    public synchronized ScheduledCall cancelScheduledCall(String id, String username) throws SQLException {
+        ScheduledCall call = findScheduledCall(id);
+        if (call == null || (!username.equals(call.creator()) && !username.equals(call.callee()))) {
+            throw new IllegalArgumentException("Scheduled call is not available");
+        }
+        try (PreparedStatement statement = conn().prepareStatement(
+                "UPDATE scheduled_calls SET status = 'CANCELLED' WHERE id = ? AND status = 'SCHEDULED'")) {
+            statement.setString(1, id);
+            statement.executeUpdate();
+        }
+        return new ScheduledCall(call.id(), call.chatId(), call.creator(), call.callee(), call.mediaType(),
+                call.scheduledAt(), "CANCELLED", call.createdAt());
+    }
+
+    private ScheduledCall findScheduledCall(String id) throws SQLException {
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT id, chat_id, creator, callee, media_type, scheduled_at, status, created_at " +
+                        "FROM scheduled_calls WHERE id = ?")) {
+            statement.setString(1, id);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? scheduledCallFrom(result) : null;
+            }
+        }
+    }
+
+    private static ScheduledCall scheduledCallFrom(ResultSet result) throws SQLException {
+        return new ScheduledCall(result.getString("id"), result.getString("chat_id"),
+                result.getString("creator"), result.getString("callee"), result.getString("media_type"),
+                Instant.parse(result.getString("scheduled_at")), result.getString("status"),
+                Instant.parse(result.getString("created_at")));
+    }
+
+    public synchronized UserProfile findProfile(String username) throws SQLException {
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT username, display_name, profession, workplace, region, phone, permissions, about, presence, last_seen " +
+                        "FROM users WHERE username = ? AND status = 'APPROVED'")) {
+            statement.setString(1, username == null ? "" : username.toLowerCase(Locale.ROOT));
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                String lastSeen = result.getString("last_seen");
+                return new UserProfile(result.getString("username"), result.getString("display_name"),
+                        result.getString("profession"), result.getString("workplace"), result.getString("region"),
+                        result.getString("phone"), result.getString("permissions"), result.getString("about"),
+                        result.getString("presence"), lastSeen == null || lastSeen.isBlank() ? null : Instant.parse(lastSeen));
+            }
+        }
+    }
+
+    public synchronized UserProfile updateProfile(String username, String about, String presence) throws SQLException {
+        if (about == null || about.length() > 2000) {
+            throw new IllegalArgumentException("About text must be at most 2000 characters");
+        }
+        validatePresence(presence);
+        try (PreparedStatement statement = conn().prepareStatement(
+                "UPDATE users SET about = ?, presence = ?, last_seen = ? WHERE username = ? AND status = 'APPROVED'")) {
+            String now = Instant.now().toString();
+            statement.setString(1, about.trim());
+            statement.setString(2, presence);
+            statement.setString(3, now);
+            statement.setString(4, username);
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalArgumentException("Approved user not found");
+            }
+        }
+        return findProfile(username);
+    }
+
+    public synchronized void updatePresence(String username, String presence) throws SQLException {
+        validatePresence(presence);
+        try (PreparedStatement statement = conn().prepareStatement(
+                "UPDATE users SET presence = ?, last_seen = ? WHERE username = ? AND status = 'APPROVED'")) {
+            statement.setString(1, presence);
+            statement.setString(2, Instant.now().toString());
+            statement.setString(3, username);
+            statement.executeUpdate();
+        }
+    }
+
+    private static void validatePresence(String presence) {
+        if (!Set.of("online", "offline", "away", "busy", "dnd").contains(presence)) {
+            throw new IllegalArgumentException("Unsupported presence status");
+        }
+    }
+
+    public synchronized Notification createNotification(String recipient, String title, String body,
+                                                         String severity, String createdBy, Instant expiresAt)
+            throws SQLException {
+        if (title == null || title.isBlank() || title.length() > 160
+                || body == null || body.isBlank() || body.length() > 4000) {
+            throw new IllegalArgumentException("Notification title/body is invalid");
+        }
+        if (!Set.of("info", "warning", "emergency").contains(severity)) {
+            throw new IllegalArgumentException("Unsupported notification severity");
+        }
+        String id = java.util.UUID.randomUUID().toString();
+        Instant createdAt = Instant.now();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "INSERT INTO notifications(id, recipient_username, title, body, severity, created_by, created_at, expires_at) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
+            statement.setString(1, id);
+            statement.setString(2, recipient == null ? "" : recipient.trim().toLowerCase(Locale.ROOT));
+            statement.setString(3, title.trim());
+            statement.setString(4, body.trim());
+            statement.setString(5, severity);
+            statement.setString(6, createdBy);
+            statement.setString(7, createdAt.toString());
+            statement.setString(8, expiresAt == null ? "" : expiresAt.toString());
+            statement.executeUpdate();
+        }
+        return new Notification(id, recipient == null ? "" : recipient.trim().toLowerCase(Locale.ROOT),
+                title.trim(), body.trim(), severity, createdBy, createdAt, expiresAt, false);
+    }
+
+    public synchronized List<Notification> findNotifications(String username) throws SQLException {
+        List<Notification> notifications = new ArrayList<>();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT n.id, n.recipient_username, n.title, n.body, n.severity, n.created_by, n.created_at, n.expires_at, " +
+                        "CASE WHEN r.username IS NULL THEN 0 ELSE 1 END AS is_read " +
+                        "FROM notifications n LEFT JOIN notification_reads r ON r.notification_id = n.id AND r.username = ? " +
+                        "WHERE (n.recipient_username = '' OR n.recipient_username = ?) " +
+                        "AND (n.expires_at = '' OR n.expires_at > ?) ORDER BY n.created_at DESC")) {
+            String now = Instant.now().toString();
+            statement.setString(1, username);
+            statement.setString(2, username);
+            statement.setString(3, now);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    String expiresAt = result.getString("expires_at");
+                    notifications.add(new Notification(result.getString("id"), result.getString("recipient_username"),
+                            result.getString("title"), result.getString("body"), result.getString("severity"),
+                            result.getString("created_by"), Instant.parse(result.getString("created_at")),
+                            expiresAt == null || expiresAt.isBlank() ? null : Instant.parse(expiresAt),
+                            result.getBoolean("is_read")));
+                }
+            }
+        }
+        return notifications;
+    }
+
+    public synchronized void markNotificationRead(String id, String username) throws SQLException {
+        try (PreparedStatement statement = conn().prepareStatement(
+                postgres ? "INSERT INTO notification_reads(notification_id, username, read_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
+                        : "INSERT OR IGNORE INTO notification_reads(notification_id, username, read_at) VALUES (?, ?, ?)")) {
+            statement.setString(1, id);
+            statement.setString(2, username);
+            statement.setString(3, Instant.now().toString());
+            statement.executeUpdate();
+        }
+    }
+
+    private static Call callFrom(ResultSet result) throws SQLException {
+        String endedAt = result.getString("ended_at");
+        return new Call(result.getString("id"), result.getString("chat_id"),
+                result.getString("caller"), result.getString("callee"),
+                result.getString("media_type"), result.getString("status"),
+                Instant.parse(result.getString("created_at")),
+                endedAt == null || endedAt.isBlank() ? null : Instant.parse(endedAt));
+    }
+
+    public synchronized CallEvent addCallEvent(String callId, String sender, String eventType, String payload)
+            throws SQLException {
+        Call call = findCall(callId);
+        if (call == null || (!sender.equals(call.caller()) && !sender.equals(call.callee()))) {
+            throw new IllegalArgumentException("Call is not available");
+        }
+        if (!Set.of("offer", "answer", "candidate", "accept", "reject", "end").contains(eventType)) {
+            throw new IllegalArgumentException("Unsupported call event");
+        }
+        if (payload == null || payload.length() > 100_000) {
+            throw new IllegalArgumentException("Call event payload is too large");
+        }
+        Instant createdAt = Instant.now();
+        long eventId = 0;
+        try (PreparedStatement statement = conn().prepareStatement(
+                "INSERT INTO call_events(call_id, sender, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+                Statement.RETURN_GENERATED_KEYS)) {
+            statement.setString(1, callId);
+            statement.setString(2, sender);
+            statement.setString(3, eventType);
+            statement.setString(4, payload == null ? "" : payload);
+            statement.setString(5, createdAt.toString());
+            statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                if (keys.next()) {
+                    eventId = keys.getLong(1);
+                }
+            }
+        }
+        String status = switch (eventType) {
+            case "accept", "offer", "answer", "candidate" -> "ACTIVE";
+            case "reject" -> "REJECTED";
+            case "end" -> "ENDED";
+            default -> call.status();
+        };
+        if (!status.equals(call.status())) {
+            try (PreparedStatement statement = conn().prepareStatement(
+                    "UPDATE calls SET status = ?, ended_at = ? WHERE id = ?")) {
+                statement.setString(1, status);
+                statement.setString(2, "ENDED".equals(status) || "REJECTED".equals(status)
+                        ? createdAt.toString() : "");
+                statement.setString(3, callId);
+                statement.executeUpdate();
+            }
+        }
+        return new CallEvent(eventId, callId, sender, eventType, payload == null ? "" : payload, createdAt);
+    }
+
+    public synchronized List<CallEvent> findCallEvents(String callId, String username, long afterId)
+            throws SQLException {
+        Call call = findCall(callId);
+        if (call == null || (!username.equals(call.caller()) && !username.equals(call.callee()))) {
+            throw new IllegalArgumentException("Call is not available");
+        }
+        List<CallEvent> events = new ArrayList<>();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT id, call_id, sender, event_type, payload, created_at FROM call_events " +
+                        "WHERE call_id = ? AND id > ? ORDER BY id")) {
+            statement.setString(1, callId);
+            statement.setLong(2, Math.max(0, afterId));
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    events.add(new CallEvent(result.getLong("id"), result.getString("call_id"),
+                            result.getString("sender"), result.getString("event_type"),
+                            result.getString("payload"), Instant.parse(result.getString("created_at"))));
+                }
+            }
+        }
+        return events;
+    }
+
     public synchronized List<Message> findMessages(String chatId, String username) throws SQLException {
         if (!chatExists(chatId) || !isMember(chatId, username)) {
             throw new IllegalArgumentException("Chat is not available");
@@ -540,6 +1057,7 @@ public final class ChatRepository implements AutoCloseable {
 
     public synchronized Message addMessage(String chatId, String sender, String permissions, String text)
             throws SQLException {
+        boolean anonymousChat = "anonymous".equals(chatId);
         boolean isSystemSender = "Марсель 🐾".equals(sender) || "AI Helpdesk Bot".equals(sender)
                 || "Бот техподдержки".equals(sender) || "Система".equals(sender);
         if (!chatExists(chatId) || (!isSystemSender && !isMember(chatId, sender))) {
@@ -563,7 +1081,7 @@ public final class ChatRepository implements AutoCloseable {
                 "INSERT INTO messages(chat_id, sender, text, sent_at) VALUES (?, ?, ?, ?)",
                 Statement.RETURN_GENERATED_KEYS)) {
             statement.setString(1, chatId);
-            statement.setString(2, sender);
+            statement.setString(2, anonymousChat ? "anonymous" : sender);
             statement.setString(3, text);
             statement.setString(4, sentAt.toString());
             statement.executeUpdate();
@@ -573,8 +1091,12 @@ public final class ChatRepository implements AutoCloseable {
                 }
             }
         }
-        String displayName = sender;
-        String role = "";
+        String visibleSender = anonymousChat ? "anonymous" : sender;
+        String displayName = anonymousChat ? "Аноним" : sender;
+        String role = anonymousChat ? "Сотрудник" : "";
+        if (anonymousChat) {
+            return new Message(generatedId, visibleSender, displayName, role, text, sentAt, List.of());
+        }
         if ("Марсель 🐾".equals(sender)) {
             role = "Главный по спокойствию";
         } else if ("AI Helpdesk Bot".equals(sender)) {
@@ -814,7 +1336,10 @@ public final class ChatRepository implements AutoCloseable {
         }
     }
 
-    private void deleteSession(String token) throws SQLException {
+    public synchronized void deleteSession(String token) throws SQLException {
+        if (token == null || token.isBlank()) {
+            return;
+        }
         try (PreparedStatement statement = conn().prepareStatement("DELETE FROM sessions WHERE token = ?")) {
             statement.setString(1, token);
             statement.executeUpdate();
@@ -941,5 +1466,31 @@ public final class ChatRepository implements AutoCloseable {
     }
 
     public record Session(String token, String role, String username, Instant expiresAt) {
+    }
+
+    public record Attachment(String id, String chatId, String uploader, String originalName,
+                             String storedName, String contentType, long size, Instant createdAt) {
+    }
+
+    public record Call(String id, String chatId, String caller, String callee, String mediaType,
+                       String status, Instant createdAt, Instant endedAt) {
+    }
+
+    public record CallEvent(long id, String callId, String sender, String eventType,
+                            String payload, Instant createdAt) {
+    }
+
+    public record ScheduledCall(String id, String chatId, String creator, String callee,
+                                String mediaType, Instant scheduledAt, String status, Instant createdAt) {
+    }
+
+    public record UserProfile(String username, String displayName, String profession,
+                              String workplace, String region, String phone, String permissions,
+                              String about, String presence, Instant lastSeen) {
+    }
+
+    public record Notification(String id, String recipient, String title, String body,
+                               String severity, String createdBy, Instant createdAt,
+                               Instant expiresAt, boolean read) {
     }
 }

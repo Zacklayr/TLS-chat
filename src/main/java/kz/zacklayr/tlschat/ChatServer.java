@@ -24,16 +24,24 @@ import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 public final class ChatServer implements AutoCloseable {
+    private static final long MAX_ATTACHMENT_BYTES = 25L * 1024 * 1024;
     private final HttpServer server;
     private final ChatRepository repository;
+    private final Path fileStorage;
     public ChatServer(int port, Path database) throws IOException, SQLException {
         String databaseUrl = System.getenv("DATABASE_URL");
         repository = new ChatRepository(databaseUrl == null || databaseUrl.isBlank()
                 ? "jdbc:sqlite:" + database.toAbsolutePath()
                 : databaseUrl);
+        fileStorage = Path.of(System.getenv().getOrDefault("FILE_STORAGE_DIR", "uploads")).toAbsolutePath().normalize();
+        Files.createDirectories(fileStorage);
         server = createServer(port);
         server.createContext("/api/registration", this::handleRegistration);
         server.createContext("/api/login", this::handleLogin);
+        server.createContext("/api/logout", this::handleLogout);
+        server.createContext("/health", this::handleHealth);
+        server.createContext("/api/files", this::handleFiles);
+        server.createContext("/api/calls", this::handleCalls);
         server.createContext("/api/registrar", this::handleRegistrar);
         server.createContext("/api/admin", this::handleAdmin);
         server.createContext("/api/chats", this::handleChats);
@@ -98,6 +106,189 @@ public final class ChatServer implements AutoCloseable {
                     escape(account.permissions()) + "\"}");
         } catch (IllegalArgumentException e) {
             writeJson(exchange, 401, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void handleLogout(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            String header = exchange.getRequestHeaders().getFirst("Authorization");
+            if (header != null && header.startsWith("Bearer ")) {
+                repository.deleteSession(header.substring("Bearer ".length()).trim());
+            }
+            writeJson(exchange, 204, "");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void handleHealth(HttpExchange exchange) throws IOException {
+        try {
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            writeJson(exchange, 200, "{\"status\":\"ok\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void handleFiles(HttpExchange exchange) throws IOException {
+        ChatRepository.Attachment attachment = null;
+        try {
+            ChatRepository.UserAccount account = authenticatedUser(exchange);
+            if (account == null) {
+                writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+                return;
+            }
+            String path = exchange.getRequestURI().getPath();
+            if ("/api/files".equals(path) && "POST".equals(exchange.getRequestMethod())) {
+                String chatId = queryValue(exchange.getRequestURI().getRawQuery(), "chatId");
+                if (!repository.isChatMember(chatId, account.username())) {
+                    writeJson(exchange, 403, "{\"error\":\"Chat is not available\"}");
+                    return;
+                }
+                String originalName = exchange.getRequestHeaders().getFirst("X-Filename");
+                if (originalName == null || originalName.isBlank()) {
+                    throw new IllegalArgumentException("X-Filename is required");
+                }
+                originalName = Path.of(originalName).getFileName().toString().trim();
+                if (originalName.isBlank() || originalName.length() > 180) {
+                    throw new IllegalArgumentException("Invalid file name");
+                }
+                String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
+                if (contentType == null || contentType.isBlank()) {
+                    contentType = "application/octet-stream";
+                }
+                byte[] data = exchange.getRequestBody().readNBytes((int) MAX_ATTACHMENT_BYTES + 1);
+                if (data.length > MAX_ATTACHMENT_BYTES) {
+                    writeJson(exchange, 413, "{\"error\":\"File is too large (maximum 25 MB)\"}");
+                    return;
+                }
+                String storedName = java.util.UUID.randomUUID() + "-" + safeExtension(originalName);
+                Path storedPath = fileStorage.resolve(storedName).normalize();
+                if (!storedPath.getParent().equals(fileStorage)) {
+                    throw new IllegalArgumentException("Invalid file path");
+                }
+                Files.write(storedPath, data);
+                try {
+                    attachment = repository.createAttachment(chatId, account.username(), originalName,
+                            storedName, contentType, data.length);
+                } catch (RuntimeException | SQLException e) {
+                    Files.deleteIfExists(storedPath);
+                    throw e;
+                }
+                writeJson(exchange, 201, attachmentJson(attachment));
+                return;
+            }
+            String prefix = "/api/files/";
+            if (path.startsWith(prefix) && "GET".equals(exchange.getRequestMethod())) {
+                String id = URLDecoder.decode(path.substring(prefix.length()), StandardCharsets.UTF_8);
+                attachment = repository.findAttachment(id);
+                if (attachment == null || !repository.isChatMember(attachment.chatId(), account.username())) {
+                    writeJson(exchange, 404, "{\"error\":\"File not found\"}");
+                    return;
+                }
+                Path storedPath = fileStorage.resolve(attachment.storedName()).normalize();
+                if (!storedPath.getParent().equals(fileStorage) || !Files.isRegularFile(storedPath)) {
+                    writeJson(exchange, 404, "{\"error\":\"File not found\"}");
+                    return;
+                }
+                byte[] data = Files.readAllBytes(storedPath);
+                exchange.getResponseHeaders().set("Content-Type", attachment.contentType());
+                String downloadName = attachment.originalName().replaceAll("[\\\"\\r\\n]", "_");
+                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\""
+                        + downloadName + "\"");
+                exchange.sendResponseHeaders(200, data.length);
+                try (OutputStream output = exchange.getResponseBody()) {
+                    output.write(data);
+                }
+                return;
+            }
+            writeJson(exchange, 404, "{\"error\":\"Not found\"}");
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void handleCalls(HttpExchange exchange) throws IOException {
+        try {
+            ChatRepository.UserAccount account = authenticatedUser(exchange);
+            if (account == null) {
+                writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+                return;
+            }
+            String path = exchange.getRequestURI().getPath();
+            if ("/api/calls".equals(path) && "POST".equals(exchange.getRequestMethod())) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                ChatRepository.Call call = repository.createCall(
+                        jsonValue(body, "chatId"), account.username(), jsonValue(body, "username"),
+                        jsonValue(body, "mediaType"));
+                writeJson(exchange, 201, callJson(call));
+                return;
+            }
+            if ("/api/calls/incoming".equals(path) && "GET".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 200, callsJson(repository.findIncomingCalls(account.username())));
+                return;
+            }
+            String prefix = "/api/calls/";
+            if (!path.startsWith(prefix)) {
+                writeJson(exchange, 404, "{\"error\":\"Not found\"}");
+                return;
+            }
+            String remainder = path.substring(prefix.length());
+            int slash = remainder.indexOf('/');
+            String callId = slash < 0 ? remainder : remainder.substring(0, slash);
+            if (callId.isBlank()) {
+                writeJson(exchange, 404, "{\"error\":\"Call not found\"}");
+                return;
+            }
+            if (slash < 0 && "GET".equals(exchange.getRequestMethod())) {
+                ChatRepository.Call call = repository.findCall(callId);
+                if (call == null || (!account.username().equals(call.caller()) && !account.username().equals(call.callee()))) {
+                    writeJson(exchange, 404, "{\"error\":\"Call not found\"}");
+                    return;
+                }
+                writeJson(exchange, 200, callJson(call));
+                return;
+            }
+            if (slash > 0 && "/events".equals(remainder.substring(slash))
+                    && "GET".equals(exchange.getRequestMethod())) {
+                long after = 0;
+                String afterValue = queryValue(exchange.getRequestURI().getRawQuery(), "after");
+                if (!afterValue.isBlank()) {
+                    after = Long.parseLong(afterValue);
+                }
+                writeJson(exchange, 200, callEventsJson(repository.findCallEvents(callId, account.username(), after)));
+                return;
+            }
+            if (slash > 0 && "/events".equals(remainder.substring(slash))
+                    && "POST".equals(exchange.getRequestMethod())) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                ChatRepository.CallEvent event = repository.addCallEvent(callId, account.username(),
+                        jsonValue(body, "type"), jsonValue(body, "payload"));
+                writeJson(exchange, 201, callEventJson(event));
+                return;
+            }
+            writeJson(exchange, 404, "{\"error\":\"Not found\"}");
+        } catch (NumberFormatException e) {
+            writeJson(exchange, 400, "{\"error\":\"Invalid event cursor\"}");
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
         } catch (SQLException e) {
             writeJson(exchange, 500, "{\"error\":\"Database error\"}");
         } finally {
@@ -283,6 +474,9 @@ public final class ChatServer implements AutoCloseable {
                 writeJson(exchange, 201, chatJson(chat));
             } else if ("GET".equals(exchange.getRequestMethod()) && "/api/chats".equals(path)) {
                 writeJson(exchange, 200, chatsJson(repository.findChatsForUser(account)));
+            } else if ("GET".equals(exchange.getRequestMethod()) && parts.length == 5 && "peer".equals(parts[4])) {
+                String peer = repository.findChatPeer(parts[3], account.username());
+                writeJson(exchange, 200, "{\"username\":\"" + escape(peer) + "\"}");
             } else if ("GET".equals(exchange.getRequestMethod()) && parts.length == 4 && !parts[3].isBlank()) {
                 writeJson(exchange, 200, messagesJson(repository.findMessages(parts[3], account.username())));
             } else if ("POST".equals(exchange.getRequestMethod()) && parts.length == 5 && "messages".equals(parts[4])) {
@@ -472,6 +666,61 @@ public final class ChatServer implements AutoCloseable {
                 escape(user.profession()) + "\",\"workplace\":\"" + escape(user.workplace()) +
                 "\",\"region\":\"" + escape(user.region()) + "\"}")
                 .collect(java.util.stream.Collectors.joining(",")) + "]";
+    }
+
+    private static String attachmentJson(ChatRepository.Attachment attachment) {
+        return "{\"id\":\"" + escape(attachment.id()) + "\",\"name\":\""
+                + escape(attachment.originalName()) + "\",\"contentType\":\""
+                + escape(attachment.contentType()) + "\",\"size\":" + attachment.size()
+                + ",\"url\":\"/api/files/" + escape(attachment.id()) + "\"}";
+    }
+
+    private static String callJson(ChatRepository.Call call) {
+        return "{\"id\":\"" + escape(call.id()) + "\",\"chatId\":\"" + escape(call.chatId())
+                + "\",\"caller\":\"" + escape(call.caller()) + "\",\"callee\":\""
+                + escape(call.callee()) + "\",\"mediaType\":\"" + escape(call.mediaType())
+                + "\",\"status\":\"" + escape(call.status()) + "\",\"createdAt\":\""
+                + call.createdAt() + "\"}";
+    }
+
+    private static String callEventJson(ChatRepository.CallEvent event) {
+        return "{\"id\":" + event.id() + ",\"callId\":\"" + escape(event.callId())
+                + "\",\"sender\":\"" + escape(event.sender()) + "\",\"type\":\""
+                + escape(event.eventType()) + "\",\"payload\":\"" + escape(event.payload())
+                + "\",\"createdAt\":\"" + event.createdAt() + "\"}";
+    }
+
+    private static String callEventsJson(List<ChatRepository.CallEvent> events) {
+        return "[" + events.stream().map(ChatServer::callEventJson)
+                .collect(Collectors.joining(",")) + "]";
+    }
+
+    private static String callsJson(List<ChatRepository.Call> calls) {
+        return "[" + calls.stream().map(ChatServer::callJson)
+                .collect(Collectors.joining(",")) + "]";
+    }
+
+    private static String queryValue(String rawQuery, String key) {
+        if (rawQuery == null || rawQuery.isBlank()) {
+            return "";
+        }
+        for (String part : rawQuery.split("&")) {
+            int separator = part.indexOf('=');
+            String rawKey = separator < 0 ? part : part.substring(0, separator);
+            if (key.equals(URLDecoder.decode(rawKey, StandardCharsets.UTF_8))) {
+                return separator < 0 ? "" : URLDecoder.decode(part.substring(separator + 1), StandardCharsets.UTF_8);
+            }
+        }
+        return "";
+    }
+
+    private static String safeExtension(String fileName) {
+        int dot = fileName.lastIndexOf('.');
+        if (dot < 0 || dot == fileName.length() - 1 || fileName.length() - dot > 12) {
+            return "";
+        }
+        String extension = fileName.substring(dot).toLowerCase(Locale.ROOT);
+        return extension.matches("\\.[a-z0-9]+") ? extension : "";
     }
 
     private static String jsonValue(String json, String key) {
