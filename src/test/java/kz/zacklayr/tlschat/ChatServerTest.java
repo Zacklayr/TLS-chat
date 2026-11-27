@@ -40,6 +40,12 @@ class ChatServerTest {
             assertEquals(200, adminPage.statusCode());
             assertTrue(adminPage.body().contains("/api/admin/users"));
 
+            HttpResponse<String> anonymousMembers = HttpClient.newHttpClient().send(
+                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port()
+                            + "/api/admin/chats/general/members")).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(401, anonymousMembers.statusCode());
+
             HttpResponse<String> manifest = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/manifest.webmanifest")).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
@@ -62,6 +68,69 @@ class ChatServerTest {
     }
 
     @Test
+    void throttlesRepeatedFailedLogins() throws Exception {
+        var database = Files.createTempFile("tls-chat-login-test-", ".db");
+        try (ChatServer server = new ChatServer(0, database)) {
+            server.start();
+            URI endpoint = URI.create("http://127.0.0.1:" + server.port() + "/api/login");
+            HttpClient client = HttpClient.newHttpClient();
+            for (int i = 0; i < 5; i++) {
+                HttpResponse<String> response = client.send(
+                        HttpRequest.newBuilder(endpoint)
+                                .header("Content-Type", "application/json")
+                                .POST(HttpRequest.BodyPublishers.ofString(
+                                        "{\"username\":\"unknown\",\"password\":\"wrong\"}"))
+                                .build(), HttpResponse.BodyHandlers.ofString());
+                assertEquals(401, response.statusCode());
+            }
+            HttpResponse<String> blocked = client.send(
+                    HttpRequest.newBuilder(endpoint)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(
+                                    "{\"username\":\"unknown\",\"password\":\"wrong\"}"))
+                            .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(429, blocked.statusCode());
+        } finally {
+            Files.deleteIfExists(database);
+        }
+    }
+
+    @Test
+    void rejectsOversizedJsonRequestBeforeParsing() throws Exception {
+        var database = Files.createTempFile("tls-chat-size-test-", ".db");
+        try (ChatServer server = new ChatServer(0, database)) {
+            server.start();
+            String oversized = "{\"username\":\"user\",\"password\":\"" + "x".repeat(70_000) + "\"}";
+            HttpResponse<String> response = HttpClient.newHttpClient().send(
+                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/api/login"))
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(oversized))
+                            .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(413, response.statusCode());
+        } finally {
+            Files.deleteIfExists(database);
+        }
+    }
+
+    @Test
+    void rejectsOversizedChunkedJsonRequestBeforeParsing() throws Exception {
+        var database = Files.createTempFile("tls-chat-chunked-size-test-", ".db");
+        try (ChatServer server = new ChatServer(0, database)) {
+            server.start();
+            String oversized = "{\"username\":\"user\",\"password\":\"" + "x".repeat(70_000) + "\"}";
+            HttpResponse<String> response = HttpClient.newHttpClient().send(
+                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/api/login"))
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofInputStream(() ->
+                                    new java.io.ByteArrayInputStream(oversized.getBytes(java.nio.charset.StandardCharsets.UTF_8))))
+                            .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(413, response.statusCode());
+        } finally {
+            Files.deleteIfExists(database);
+        }
+    }
+
+    @Test
     void runsAuthenticatedApiFlowAgainstTemporaryDatabase() throws Exception {
         var database = Files.createTempFile("tls-chat-auth-test-", ".db");
         try (ChatRepository seed = new ChatRepository("jdbc:sqlite:" + database.toAbsolutePath())) {
@@ -69,6 +138,9 @@ class ChatServerTest {
             seed.decideRegistration(request.id(), "APPROVED", request.fullName(), request.profession(),
                     request.workplace(), request.region(), request.phone(), "global_write", "employee", "password123");
             seed.assignChatsForUser("employee");
+            var hiddenRequest = seed.registerApplication("Hidden Data User", "HR", "People", "Almaty", "+70000000009");
+            seed.decideRegistration(hiddenRequest.id(), "APPROVED", hiddenRequest.fullName(), hiddenRequest.profession(),
+                    hiddenRequest.workplace(), hiddenRequest.region(), hiddenRequest.phone(), "hidden_data", "hidden", "password123");
         }
         try (ChatServer server = new ChatServer(0, database)) {
             server.start();
@@ -89,11 +161,51 @@ class ChatServerTest {
             assertEquals(200, profile.statusCode());
             assertTrue(profile.body().contains("employee"));
 
+            HttpResponse<String> profileUpdate = client.send(HttpRequest.newBuilder(URI.create(base + "/api/profile"))
+                            .header("Authorization", "Bearer " + token)
+                            .header("Content-Type", "application/json")
+                            .PUT(HttpRequest.BodyPublishers.ofString("{\"about\":\"Integration profile\",\"presence\":\"away\"}"))
+                            .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, profileUpdate.statusCode());
+            assertTrue(profileUpdate.body().contains("Integration profile"));
+            assertTrue(profileUpdate.body().contains("\"presence\":\"away\""));
+
+            HttpResponse<String> handoff = client.send(HttpRequest.newBuilder(URI.create(base + "/api/browser-handoff"))
+                    .header("Authorization", "Bearer " + token)
+                    .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(201, handoff.statusCode());
+            assertEquals("no-store", handoff.headers().firstValue("Cache-Control").orElse(""));
+            String handoffCode = jsonValue(handoff.body(), "code");
+            HttpResponse<String> exchanged = client.send(HttpRequest.newBuilder(
+                            URI.create(base + "/api/browser-handoff?code=" + java.net.URLEncoder.encode(
+                                    handoffCode, java.nio.charset.StandardCharsets.UTF_8)))
+                    .GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, exchanged.statusCode());
+            assertTrue(exchanged.body().contains("\"username\":\"employee\""));
+            HttpResponse<String> reused = client.send(HttpRequest.newBuilder(
+                            URI.create(base + "/api/browser-handoff?code=" + handoffCode)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(410, reused.statusCode());
+
+            HttpResponse<String> realtimeTicket = client.send(HttpRequest.newBuilder(
+                            URI.create(base + "/api/realtime-ticket"))
+                    .header("Authorization", "Bearer " + token)
+                    .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(201, realtimeTicket.statusCode());
+            assertTrue(realtimeTicket.body().contains("\"ticket\":"));
+            assertEquals("no-store", realtimeTicket.headers().firstValue("Cache-Control").orElse(""));
+
             HttpResponse<String> directory = client.send(HttpRequest.newBuilder(URI.create(base + "/api/users"))
                             .header("Authorization", "Bearer " + token).GET().build(), HttpResponse.BodyHandlers.ofString());
             assertEquals(200, directory.statusCode());
             assertTrue(directory.body().contains("employee"));
             assertFalse(directory.body().contains("+70000000000"));
+
+            String hiddenToken = loginToken(client, base, "hidden");
+            HttpResponse<String> hiddenDirectory = client.send(HttpRequest.newBuilder(URI.create(base + "/api/users"))
+                            .header("Authorization", "Bearer " + hiddenToken).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, hiddenDirectory.statusCode());
+            assertTrue(hiddenDirectory.body().contains("+70000000000"));
 
             HttpResponse<String> message = client.send(HttpRequest.newBuilder(URI.create(base + "/api/chats/general/messages"))
                             .header("Authorization", "Bearer " + token)
@@ -150,6 +262,32 @@ class ChatServerTest {
             String base = "http://127.0.0.1:" + server.port();
             String callerToken = loginToken(client, base, "call_ceo");
             String calleeToken = loginToken(client, base, "call_employee");
+
+            HttpResponse<String> iceServers = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls/ice-servers"))
+                    .header("Authorization", "Bearer " + callerToken).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, iceServers.statusCode());
+            assertTrue(iceServers.body().contains("iceServers"));
+            assertTrue(iceServers.body().contains("stun:"));
+
+            HttpResponse<String> scheduled = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls/scheduled"))
+                    .header("Authorization", "Bearer " + callerToken)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"chatId\":\"" + directChatId
+                            + "\",\"username\":\"call_employee\",\"mediaType\":\"video\",\"scheduledAt\":\""
+                            + java.time.Instant.now().plusSeconds(3600) + "\"}"))
+                    .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(201, scheduled.statusCode());
+            assertTrue(scheduled.body().contains("\"mediaType\":\"video\""));
+            String scheduledId = jsonValue(scheduled.body(), "id");
+            HttpResponse<String> scheduledList = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls/scheduled"))
+                    .header("Authorization", "Bearer " + calleeToken).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, scheduledList.statusCode());
+            assertTrue(scheduledList.body().contains(scheduledId));
+            HttpResponse<String> cancelled = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls/scheduled/" + scheduledId))
+                    .header("Authorization", "Bearer " + calleeToken).POST(HttpRequest.BodyPublishers.noBody())
+                    .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, cancelled.statusCode());
+            assertTrue(cancelled.body().contains("\"status\":\"CANCELLED\""));
 
             HttpResponse<String> created = client.send(HttpRequest.newBuilder(URI.create(base + "/api/calls"))
                     .header("Authorization", "Bearer " + callerToken)

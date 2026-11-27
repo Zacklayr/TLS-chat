@@ -8,6 +8,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,3 +21,12 @@ jobs:
           cache: maven
       - name: Run tests
         run: mvn -B verify
+      - name: Upload packaged clients
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls-chat-java-clients
+          path: |
+            target/tls-chat-desktop-jar-with-dependencies.jar
+            target/tls-chat-registrar-jar-with-dependencies.jar
+          if-no-files-found: error
+          retention-days: 14

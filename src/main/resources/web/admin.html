@@ -8,12 +8,18 @@
     :root { color-scheme: dark; --bg:#0a0d14; --panel:#141a26; --line:#2b3650; --text:#d6deeb; --accent:#39ff88; --danger:#ff5f7a; }
     * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:14px system-ui,sans-serif; }
     main { max-width:1400px; margin:auto; padding:24px; } h1,h2 { color:var(--accent); } h1 { margin-top:0; }
-    .panel { background:var(--panel); border:1px solid var(--line); padding:16px; margin:16px 0; border-radius:6px; }
+    .panel { background:var(--panel); border:1px solid var(--line); padding:16px; margin:16px 0; border-radius:6px; box-shadow:0 8px 24px #0003; }
     form { display:grid; gap:8px; } input,select,textarea,button { font:inherit; padding:8px; border:1px solid var(--line); border-radius:4px; background:#0d1320; color:var(--text); }
     button { cursor:pointer; background:#183d2a; color:var(--accent); } button.danger { color:#fff; background:#572333; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
     table { width:100%; border-collapse:collapse; } th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:8px; }
-    td input { width:100%; min-width:180px; } .muted { color:#7d8aa6; } .error { color:var(--danger); } #app { display:none; }
+    td input { width:100%; min-width:180px; } .role-picker { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:4px; margin-top:6px; white-space:normal; } .role-picker label { color:#b9c7df; font-size:12px; } .muted { color:#7d8aa6; } .error { color:var(--danger); } #app { display:none; }
+    .topbar,.section-head,.toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; } .topbar { justify-content:space-between; }
+    .section-head { justify-content:space-between; margin-bottom:10px; } .section-head h2 { margin:0; }
+    .toolbar input,.toolbar select { min-width:190px; } .toolbar input { flex:1; }
+    .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:16px 0; }
+    .stat { padding:14px; border:1px solid var(--line); border-radius:6px; background:#0d1320; } .stat b { display:block; font-size:24px; color:var(--accent); } .stat span { color:#9aa8c2; font-size:12px; }
+    .empty-state { padding:14px 0; color:#7d8aa6; } .danger-text { color:var(--danger); }
     @media (max-width:700px) { main { padding:12px; } table { display:block; overflow:auto; white-space:nowrap; } }
   </style>
 </head>
@@ -30,7 +36,13 @@
   </section>
 
   <section id="app">
-    <div class="panel"><button id="logout" class="danger">Выйти</button><span id="status" class="muted"></span></div>
+    <div class="panel topbar"><div><strong>Панель управления</strong><div id="status" class="muted">Готово</div></div><button id="logout" class="danger">Выйти</button></div>
+    <div class="stats">
+      <div class="stat"><b id="statUsers">—</b><span>одобренных сотрудников</span></div>
+      <div class="stat"><b id="statPending">—</b><span>заявок ожидают решения</span></div>
+      <div class="stat"><b id="statChats">—</b><span>доступных чатов</span></div>
+      <div class="stat"><b id="statOnline">—</b><span>сотрудников онлайн</span></div>
+    </div>
     <div class="grid">
       <section class="panel">
         <h2>Создать или изменить чат</h2>
@@ -59,14 +71,16 @@
       </section>
     </div>
 
-    <section class="panel"><h2>Пользователи</h2><button id="refreshUsers">Обновить</button><div id="users"></div></section>
-    <section class="panel"><h2>Заявки на регистрацию</h2><button id="refreshRegistrations">Обновить</button><div id="registrations"></div></section>
-    <section class="panel"><h2>Чаты</h2><button id="refreshChats">Обновить</button><div id="chats"></div></section>
+    <section class="panel"><div class="section-head"><h2>Пользователи</h2><button id="refreshUsers">Обновить</button></div><div class="toolbar"><input id="userSearch" placeholder="Поиск по имени, логину, отделу…"><select id="userStatusFilter"><option value="">Все статусы</option><option value="APPROVED">Одобрены</option><option value="SUSPENDED">Приостановлены</option></select></div><div id="users"></div></section>
+    <section class="panel"><div class="section-head"><h2>Заявки на регистрацию</h2><button id="refreshRegistrations">Обновить</button></div><div class="toolbar"><input id="registrationSearch" placeholder="Поиск заявителя, профессии или региона…"></div><div id="registrations"></div></section>
+    <section class="panel"><div class="section-head"><h2>Чаты</h2><button id="refreshChats">Обновить</button></div><div class="toolbar"><input id="chatSearch" placeholder="Поиск по ID, названию или правилам…"><select id="chatTypeFilter"><option value="">Все типы</option><option value="group">Группы</option><option value="support">Поддержка</option><option value="direct">Личные</option></select></div><div id="chats"></div></section>
+    <section class="panel"><h2>Управление участниками</h2><form id="memberForm"><input id="memberChatId" required placeholder="ID чата"><input id="memberUsername" required placeholder="Логин сотрудника"><select id="memberAction"><option value="add">Добавить</option><option value="remove">Убрать</option></select><button>Применить</button><button type="button" id="loadMembers">Показать участников</button><div id="memberList" class="muted"></div></form></section>
     <section class="panel"><h2>GitHub-коммиты</h2><button id="refreshCommits">Обновить</button><div id="commits"></div><form id="commentForm" style="margin-top:10px"><input id="commitSha" required placeholder="SHA коммита"><textarea id="commitComment" required maxlength="4000" rows="3" placeholder="Ответить на коммит"></textarea><button>Опубликовать комментарий</button></form></section>
   </section>
 </main>
 <script>
   let token = localStorage.getItem("tlsChatAdminToken") || "";
+  let cachedUsers = [], cachedChats = [], cachedRegistrations = [];
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const headers = (extra = {}) => token ? {...extra, Authorization:`Bearer ${token}`} : extra;
@@ -76,36 +90,84 @@
     if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
     return body;
   }
+  const permissionOptions = [
+    ["ceo", "CEO"], ["department_lead", "Department lead"], ["global_write", "Global chat write"],
+    ["regional_write", "Regional chat write"], ["support_agent", "Support agent"], ["hidden_data", "Hidden data"],
+    ["manage_users", "Manage users"], ["manage_chats", "Manage chats"], ["engine_lead", "Engine lead"],
+    ["integration_lead", "Integration lead"], ["porting_lead", "Porting lead"], ["support_lead", "Support lead"],
+    ["cybersecurity_lead", "Cybersecurity lead"], ["language_lead", "Language lead"], ["equipment_lead", "Equipment lead"],
+    ["wellbeing_lead", "Wellbeing lead"], ["design_lead", "Design lead"], ["game_design_lead", "Game design lead"],
+    ["scenario_lead", "Scenario lead"], ["sound_lead", "Sound lead"]
+  ];
+  function permissionPicker(current) {
+    const selected = new Set(String(current || "").split(",").map(x => x.trim()).filter(Boolean));
+    return `<div class="role-picker">${permissionOptions.map(([key, label]) => `<label><input type="checkbox" class="role-choice" data-permission="${key}" ${selected.has(key) ? "checked" : ""}>${label}</label>`).join("")}</div>`;
+  }
+  function syncPermissions(row) {
+    row.querySelector(".user-permissions,.request-permissions").value = [...row.querySelectorAll(".role-choice:checked")].map(x => x.dataset.permission).join(",");
+  }
   function showApp() { $("loginPanel").style.display="none"; $("app").style.display="block"; loadAll(); }
+  function updateStats() {
+    $("statUsers").textContent = cachedUsers.filter(u => u.status === "APPROVED").length;
+    $("statPending").textContent = cachedRegistrations.length;
+    $("statChats").textContent = cachedChats.length;
+    $("statOnline").textContent = cachedUsers.filter(u => u.status === "APPROVED" && u.presence === "online").length;
+  }
+  function applyFilters() {
+    const userQuery = $("userSearch").value.trim().toLowerCase();
+    const userStatus = $("userStatusFilter").value;
+    document.querySelectorAll("#users tbody tr").forEach(row => {
+      row.style.display = (!userQuery || row.dataset.search.includes(userQuery)) && (!userStatus || row.dataset.status === userStatus) ? "" : "none";
+    });
+    const registrationQuery = $("registrationSearch").value.trim().toLowerCase();
+    document.querySelectorAll("#registrations tbody tr").forEach(row => {
+      row.style.display = !registrationQuery || row.dataset.search.includes(registrationQuery) ? "" : "none";
+    });
+    const chatQuery = $("chatSearch").value.trim().toLowerCase();
+    const chatType = $("chatTypeFilter").value;
+    document.querySelectorAll("#chats tbody tr").forEach(row => {
+      row.style.display = (!chatQuery || row.dataset.search.includes(chatQuery)) && (!chatType || row.dataset.type === chatType) ? "" : "none";
+    });
+  }
   async function loadUsers() {
     const users = await api("/api/admin/users");
+    cachedUsers = users;
     $("users").innerHTML = `<table><thead><tr><th>Сотрудник</th><th>Статус</th><th>Присутствие</th><th>Права</th><th></th></tr></thead><tbody>` + users.map(u =>
-      `<tr data-user="${esc(u.username)}"><td><b>${esc(u.displayName)}</b><br><span class="muted">${esc(u.username)} · ${esc(u.profession)} · ${esc(u.workplace)}</span></td>`+
+      `<tr data-user="${esc(u.username)}" data-status="${esc(u.status)}" data-search="${esc(`${u.displayName} ${u.username} ${u.profession} ${u.workplace} ${u.region}`.toLowerCase())}"><td><b>${esc(u.displayName)}</b><br><span class="muted">${esc(u.username)} · ${esc(u.profession)} · ${esc(u.workplace)}</span></td>`+
       `<td><select class="user-status"><option ${u.status === "APPROVED" ? "selected" : ""}>APPROVED</option><option ${u.status === "SUSPENDED" ? "selected" : ""}>SUSPENDED</option></select></td>`+
-      `<td>${esc(u.presence)}</td><td><input class="user-permissions" value="${esc(u.permissions)}"><input class="user-password" type="password" placeholder="Новый пароль (необязательно)"></td><td><button class="save-user">Сохранить</button></td></tr>`).join("") + `</tbody></table>`;
+      `<td>${esc(u.presence)}</td><td><input class="user-permissions" value="${esc(u.permissions)}"><details><summary>Roles</summary>${permissionPicker(u.permissions)}</details><input class="user-password" type="password" placeholder="Новый пароль (необязательно)"></td><td><button class="save-user">Сохранить</button></td></tr>`).join("") + `</tbody></table>`;
+    document.querySelectorAll(".role-choice").forEach(choice => choice.onchange = () => syncPermissions(choice.closest("tr")));
     document.querySelectorAll(".save-user").forEach(button => button.onclick = async () => {
       const row = button.closest("tr");
+      syncPermissions(row);
       try { await api(`/api/admin/users/${encodeURIComponent(row.dataset.user)}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({status:row.querySelector(".user-status").value, permissions:row.querySelector(".user-permissions").value, temporaryPassword:row.querySelector(".user-password").value})}); $("status").textContent="Пользователь сохранён"; }
       catch (e) { $("status").textContent=e.message; }
     });
+    updateStats(); applyFilters();
   }
   async function loadChats() {
     const chats = await api("/api/admin/chats");
+    cachedChats = chats;
     $("chats").innerHTML = `<table><thead><tr><th>ID</th><th>Название</th><th>Тип</th><th>Правила</th><th>Права записи</th></tr></thead><tbody>` + chats.map(c =>
-      `<tr><td>${esc(c.id)}</td><td>${esc(c.name)}</td><td>${esc(c.type)}</td><td>${esc(c.professionRule)} / ${esc(c.workplaceRule)} / ${esc(c.regionRule)}</td><td>${esc(c.writePermissions)}</td></tr>`).join("") + `</tbody></table>`;
+      `<tr data-type="${esc(c.type)}" data-search="${esc(`${c.id} ${c.name} ${c.type} ${c.professionRule} ${c.workplaceRule} ${c.regionRule}`.toLowerCase())}"><td><b>${esc(c.id)}</b></td><td>${esc(c.name)}</td><td>${esc(c.type)}</td><td>${esc(c.professionRule)} / ${esc(c.workplaceRule)} / ${esc(c.regionRule)}</td><td>${esc(c.writePermissions)}</td></tr>`).join("") + `</tbody></table>`;
+    updateStats(); applyFilters();
   }
   async function loadRegistrations() {
     const requests = await api("/api/admin/registrations");
+    cachedRegistrations = requests;
     $("registrations").innerHTML = requests.length ? `<table><thead><tr><th>Заявитель</th><th>Доступ</th><th></th></tr></thead><tbody>` + requests.map(r =>
-      `<tr data-request="${esc(r.id)}"><td><b>${esc(r.fullName)}</b><br><span class="muted">${esc(r.profession)} · ${esc(r.workplace)} · ${esc(r.region)} · ${esc(r.phone)}</span></td>`+
-      `<td><input class="request-username" placeholder="Логин"><input class="request-password" type="password" placeholder="Временный пароль"><input class="request-permissions" placeholder="Права"></td>`+
+      `<tr data-request="${esc(r.id)}" data-search="${esc(`${r.fullName} ${r.profession} ${r.workplace} ${r.region} ${r.phone}`.toLowerCase())}"><td><b>${esc(r.fullName)}</b><br><span class="muted">${esc(r.profession)} · ${esc(r.workplace)} · ${esc(r.region)} · ${esc(r.phone)}</span></td>`+
+      `<td><input class="request-username" placeholder="Логин"><input class="request-password" type="password" placeholder="Временный пароль"><input class="request-permissions" placeholder="Права"><details><summary>Roles</summary>${permissionPicker("")}</details></td>`+
       `<td><button class="approve-request">Одобрить</button> <button class="reject-request danger">Отклонить</button></td></tr>`).join("") + `</tbody></table>` : `<span class="muted">Новых заявок нет</span>`;
+    document.querySelectorAll(".role-choice").forEach(choice => choice.onchange = () => syncPermissions(choice.closest("tr")));
     document.querySelectorAll(".approve-request,.reject-request").forEach(button => button.onclick = async () => {
       const row = button.closest("tr"), approve = button.classList.contains("approve-request");
+      syncPermissions(row);
       const values = {status:approve ? "APPROVED" : "REJECTED", username:row.querySelector(".request-username").value, password:row.querySelector(".request-password").value, permissions:row.querySelector(".request-permissions").value};
       try { await api(`/api/admin/registrations/${encodeURIComponent(row.dataset.request)}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(values)}); $("status").textContent="Заявка обработана"; await Promise.all([loadRegistrations(),loadUsers()]); }
       catch(e) { $("status").textContent=e.message; }
     });
+    updateStats(); applyFilters();
   }
   async function loadAll() { try { await Promise.all([loadUsers(),loadChats(),loadRegistrations(),loadCommits()]); } catch(e) { $("status").textContent=e.message; } }
   async function loadCommits() {
@@ -119,6 +181,15 @@
   $("loginForm").onsubmit = async event => { event.preventDefault(); try { const result=await api("/api/admin/login", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:$("adminUsername").value,password:$("adminPassword").value})}); token=result.token; localStorage.setItem("tlsChatAdminToken",token); showApp(); } catch(e) { $("loginStatus").textContent=e.message; } };
   $("logout").onclick = () => { token=""; localStorage.removeItem("tlsChatAdminToken"); $("app").style.display="none"; $("loginPanel").style.display="block"; };
   $("refreshUsers").onclick = loadUsers; $("refreshChats").onclick = loadChats; $("refreshRegistrations").onclick = loadRegistrations; $("refreshCommits").onclick = loadCommits;
+  ["userSearch","userStatusFilter","registrationSearch","chatSearch","chatTypeFilter"].forEach(id => $(id).addEventListener("input", applyFilters));
+  async function loadChatMembers() {
+    const chatId = $("memberChatId").value.trim();
+    if (!chatId) return;
+    try { const members = await api("/api/admin/chats/" + encodeURIComponent(chatId) + "/members"); $("memberList").textContent = members.length ? members.join(", ") : "Участников нет"; }
+    catch (e) { $("memberList").textContent = e.message; }
+  }
+  $("loadMembers").onclick = loadChatMembers;
+  $("memberForm").onsubmit = async event => { event.preventDefault(); try { await api("/api/admin/chats/" + encodeURIComponent($("memberChatId").value.trim()) + "/members", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:$("memberUsername").value.trim(),action:$("memberAction").value})}); $("status").textContent="Участники чата обновлены"; await loadChatMembers(); await loadChats(); } catch(e) { $("status").textContent=e.message; } };
   $("chatForm").onsubmit = async event => { event.preventDefault(); try { await api("/api/admin/chats", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:$("chatId").value,type:$("chatType").value,name:$("chatName").value,color:$("chatColor").value,professionRule:$("professionRule").value,workplaceRule:$("workplaceRule").value,regionRule:$("regionRule").value,writePermissions:$("writePermissions").value})}); $("status").textContent="Чат сохранён"; await loadChats(); } catch(e) { $("status").textContent=e.message; } };
   $("notificationForm").onsubmit = async event => { event.preventDefault(); try { const raw=$("expiresAt").value; await api("/api/admin/notifications", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({recipient:$("recipient").value,title:$("notificationTitle").value,body:$("notificationBody").value,severity:$("severity").value,expiresAt:raw ? new Date(raw).toISOString() : ""})}); $("status").textContent="Уведомление отправлено"; event.target.reset(); } catch(e) { $("status").textContent=e.message; } };
   if (token) showApp();

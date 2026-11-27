@@ -14,3 +14,7 @@ android {
         versionName = "0.1.0"
     }
 }
+
+dependencies {
+    implementation("org.java-websocket:Java-WebSocket:1.5.7")
+}

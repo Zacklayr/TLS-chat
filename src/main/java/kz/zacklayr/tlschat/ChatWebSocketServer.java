@@ -15,27 +15,30 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Realtime transport for messages and presence. REST remains the fallback transport. */
 public final class ChatWebSocketServer extends WebSocketServer implements AutoCloseable {
     private final ChatRepository repository;
+    private final WebSocketTicketStore ticketStore;
     private final Map<WebSocket, String> users = new ConcurrentHashMap<>();
     private final Map<WebSocket, Set<String>> subscriptions = new ConcurrentHashMap<>();
 
     public ChatWebSocketServer(int port, ChatRepository repository) {
+        this(port, repository, new WebSocketTicketStore());
+    }
+
+    public ChatWebSocketServer(int port, ChatRepository repository, WebSocketTicketStore ticketStore) {
         super(new InetSocketAddress(port));
         this.repository = repository;
+        this.ticketStore = ticketStore;
         setReuseAddr(true);
     }
 
     @Override
     public void onOpen(WebSocket connection, ClientHandshake handshake) {
         try {
-            String token = queryValue(handshake.getResourceDescriptor(), "token");
-            ChatRepository.Session session = repository.findSession(token);
-            if (session == null || !"USER".equals(session.role())) {
-                connection.close(1008, "Authentication required");
-                return;
-            }
-            ChatRepository.UserAccount account = repository.findApprovedUser(session.username());
+            String ticketUsername = ticketStore.consume(queryValue(handshake.getResourceDescriptor(), "ticket"));
+            ChatRepository.UserAccount account = ticketUsername == null
+                    ? userFromSession(queryValue(handshake.getResourceDescriptor(), "token"))
+                    : repository.findApprovedUser(ticketUsername);
             if (account == null) {
-                connection.close(1008, "User is not approved");
+                connection.close(1008, "Authentication required");
                 return;
             }
             users.put(connection, account.username());
@@ -46,6 +49,12 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
         } catch (SQLException e) {
             connection.close(1011, "Database error");
         }
+    }
+
+    private ChatRepository.UserAccount userFromSession(String token) throws SQLException {
+        ChatRepository.Session session = repository.findSession(token);
+        return session == null || !"USER".equals(session.role())
+                ? null : repository.findApprovedUser(session.username());
     }
 
     @Override
@@ -77,6 +86,19 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
                 ChatRepository.UserAccount account = repository.findApprovedUser(username);
                 Message message = repository.addMessage(chatId, username, account.permissions(), text);
                 broadcast(chatId, message);
+                if ("helpdesk".equals(chatId) && !account.permissions().contains("support_agent")) {
+                    HelpdeskBot.Reply reply = HelpdeskBot.answer(account.displayName(), text);
+                    broadcast(chatId, repository.addMessage(chatId, "AI Helpdesk Bot", "",
+                            reply.text() + " Категория: " + reply.category() + (reply.urgent() ? " [СРОЧНО]" : "")));
+                } else if ("marsel-cat".equals(chatId)) {
+                    String[] replies = {
+                            "Мяу! 🐾 Марсель желает удачи и спокойного рабочего дня!",
+                            "Мурр! Сделай паузу на пять минут и попей чай 🍵.",
+                            "Мяу-мяу! 🐱 Уровень стресса снижен, можно продолжать работу!"
+                    };
+                    String reply = replies[(int) (Math.random() * replies.length)];
+                    broadcast(chatId, repository.addMessage(chatId, "Марсель 🐾", "", reply));
+                }
                 return;
             }
             if ("presence".equals(type)) {
@@ -93,7 +115,16 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
                 }
                 boolean active = "true".equalsIgnoreCase(field(rawMessage, "active"));
                 ChatRepository.UserAccount account = repository.findApprovedUser(username);
-                broadcastTyping(chatId, account == null ? username : account.displayName(), active);
+                String displayName = "anonymous".equals(chatId)
+                        ? "Участник"
+                        : (account == null ? username : account.displayName());
+                broadcastTyping(chatId, displayName, active);
+                return;
+            }
+            if ("read".equals(type)) {
+                String chatId = field(rawMessage, "chatId");
+                repository.markMessagesRead(chatId, username);
+                if (!"anonymous".equals(chatId)) broadcastRead(chatId, username);
                 return;
             }
             if ("ping".equals(type)) {
@@ -112,10 +143,27 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
         String payload = "{\"type\":\"message\",\"chatId\":\"" + escape(chatId)
                 + "\",\"message\":" + messageJson(message) + "}";
         subscriptions.forEach((connection, chats) -> {
-            if (chats.contains(chatId) && connection.isOpen()) {
+            if (chats.contains(chatId) && canReceive(connection, chatId)) {
                 connection.send(payload);
+                connection.send(deliveredJson(chatId, message.id()));
             }
         });
+    }
+
+    private boolean canReceive(WebSocket connection, String chatId) {
+        if (!connection.isOpen()) return false;
+        String username = users.get(connection);
+        if (username == null) return false;
+        try {
+            return repository.isChatMember(chatId, username);
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
+    private static String deliveredJson(String chatId, long messageId) {
+        return "{\"type\":\"delivered\",\"chatId\":\"" + escape(chatId)
+                + "\",\"messageId\":" + messageId + "}";
     }
 
     public void broadcastNotification(ChatRepository.Notification notification) {
@@ -132,6 +180,10 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
         });
     }
 
+    public boolean hasActiveUser(String username) {
+        return username != null && users.containsValue(username);
+    }
+
     private void broadcastPresence(String username, String presence) {
         String payload = "{\"type\":\"presence\",\"username\":\"" + escape(username)
                 + "\",\"presence\":\"" + escape(presence) + "\"}";
@@ -144,7 +196,15 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
         String payload = "{\"type\":\"typing\",\"chatId\":\"" + escape(chatId)
                 + "\",\"name\":\"" + escape(displayName) + "\",\"active\":" + active + "}";
         subscriptions.forEach((connection, chats) -> {
-            if (chats.contains(chatId) && connection.isOpen()) connection.send(payload);
+            if (chats.contains(chatId) && canReceive(connection, chatId)) connection.send(payload);
+        });
+    }
+
+    private void broadcastRead(String chatId, String username) {
+        String payload = "{\"type\":\"read\",\"chatId\":\"" + escape(chatId)
+                + "\",\"username\":\"" + escape(username) + "\"}";
+        subscriptions.forEach((connection, chats) -> {
+            if (chats.contains(chatId) && canReceive(connection, chatId)) connection.send(payload);
         });
     }
 
@@ -158,7 +218,7 @@ public final class ChatWebSocketServer extends WebSocketServer implements AutoCl
     public void onClose(WebSocket connection, int code, String reason, boolean remote) {
         String username = users.remove(connection);
         subscriptions.remove(connection);
-        if (username != null) {
+        if (username != null && !users.containsValue(username)) {
             try {
                 repository.updatePresence(username, "offline");
                 broadcastPresence(username, "offline");

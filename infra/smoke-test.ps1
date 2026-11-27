@@ -40,6 +40,11 @@ if ($icon.StatusCode -ne 200 -or $icon.Headers["Content-Type"] -notmatch "image/
 }
 
 $root = Get-Endpoint "/"
+$rootText = Get-ResponseText $root
+$clientFeaturesOk = ($rootText -match "RTCPeerConnection") -and ($rootText -match "/api/calls") -and ($rootText -match "navigator\.serviceWorker") -and ($rootText -match "typing")
+if (-not $clientFeaturesOk) {
+    throw "Client feature check failed: WebRTC/PWA/typing code is missing from the published page"
+}
 $securityHeadersOk = ($root.StatusCode -eq 200) -and ($root.Headers["X-Content-Type-Options"] -eq "nosniff") -and ($root.Headers["X-Frame-Options"] -eq "DENY") -and ($root.Headers["Content-Security-Policy"] -match "frame-ancestors 'none'")
 if (-not $securityHeadersOk) {
     throw "Security header check failed: HTTP $($root.StatusCode)"
@@ -48,6 +53,20 @@ if (-not $securityHeadersOk) {
 try {
     Get-Endpoint "/api/chats" | Out-Null
     throw "Protected chats endpoint unexpectedly allowed anonymous access"
+} catch {
+    if ($_.Exception.Response.StatusCode.value__ -ne 401) { throw }
+}
+
+try {
+    Get-Endpoint "/api/users" | Out-Null
+    throw "Protected user directory unexpectedly allowed anonymous access"
+} catch {
+    if ($_.Exception.Response.StatusCode.value__ -ne 401) { throw }
+}
+
+try {
+    Get-Endpoint "/api/calls/ice-servers" | Out-Null
+    throw "Protected ICE endpoint unexpectedly allowed anonymous access"
 } catch {
     if ($_.Exception.Response.StatusCode.value__ -ne 401) { throw }
 }

@@ -11,7 +11,7 @@ if ([string]::IsNullOrWhiteSpace($env:BACKUP_ENCRYPTION_KEY)) {
 
 $env:BACKUP_SOURCE_DIR = $SourceDir
 $env:BACKUP_OUTPUT_DIR = $OutputDir
-$classpath = "target/classes;target/dependency/*"
+$classpath = "target/classes$([IO.Path]::PathSeparator)target/dependency/*"
 
 if ($UsePostgresDump) {
     if ([string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {

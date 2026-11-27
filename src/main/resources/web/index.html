@@ -432,6 +432,7 @@
   let chats = [];
   let currentUser = null;
   let authToken = localStorage.getItem("tlsChatToken");
+  const browserHandoffCode = new URLSearchParams(location.search).get("handoff");
   try {
     currentUser = JSON.parse(localStorage.getItem("tlsChatUser") || "null");
   } catch (_) {
@@ -443,6 +444,7 @@
   let callPollTimer = null;
   let incomingCallId = null;
   let realtimeSocket = null;
+  let realtimeConnecting = false;
   let typingTimer = null;
   let filter = "all";
   const $ = id => document.getElementById(id);
@@ -459,6 +461,30 @@
     return t.slice(11, 16) || t;
   };
   const nameColor = cls => ({ "c-blue":"#8fd6ff","c-green":"#7bd389","c-orange":"#ffb35c","c-purple":"#b59cff","c-pink":"#ff9ec9" }[cls] || "#8fd6ff");
+
+  async function activateAuthenticatedSession() {
+    $("whoami").textContent = `${currentUser.displayName} · ${currentUser.profession}`;
+    $("empty").style.display = "none";
+    $("logout").style.display = "block";
+    $("profileBtn").style.display = "block";
+    connectRealtime();
+    await loadChats();
+    await loadCeoUsers();
+    await checkNotifications();
+  }
+
+  async function acceptBrowserHandoff() {
+    if (!browserHandoffCode || authToken) return false;
+    const response = await fetch(`/api/browser-handoff?code=${encodeURIComponent(browserHandoffCode)}`);
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "WebRTC handoff expired");
+    authToken = result.token;
+    currentUser = result;
+    localStorage.setItem("tlsChatToken", authToken);
+    localStorage.setItem("tlsChatUser", JSON.stringify(result));
+    history.replaceState(null, "", location.pathname + location.hash);
+    return true;
+  }
 
   // последнее сообщение чата (для превью)
   const lastOf = c => [...c.msgs].reverse().find(m => !m.day && !m.sys);
@@ -504,6 +530,9 @@
     const response = await fetch(`/api/chats/${encodeURIComponent(chat.id)}`, { headers: authHeaders() });
     if (!response.ok) throw new Error("Не удалось загрузить историю чата");
     chat.msgs = await response.json();
+    if (realtimeSocket && realtimeSocket.readyState === WebSocket.OPEN && chat.id !== "anonymous") {
+      realtimeSocket.send(JSON.stringify({ type: "read", chatId: chat.id }));
+    }
   }
 
   function subscribeRealtime(chatId) {
@@ -512,11 +541,18 @@
     }
   }
 
-  function connectRealtime() {
-    if (!authToken || !window.WebSocket || realtimeSocket) return;
+  async function connectRealtime() {
+    if (!authToken || !window.WebSocket || realtimeSocket || realtimeConnecting) return;
+    realtimeConnecting = true;
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     try {
-      realtimeSocket = new WebSocket(`${protocol}://${location.host}/ws/?token=${encodeURIComponent(authToken)}`);
+      const ticketResponse = await fetch("/api/realtime-ticket", {
+        method: "POST", headers: authHeaders()
+      });
+      const ticketResult = await ticketResponse.json().catch(() => ({}));
+      if (!ticketResponse.ok || !ticketResult.ticket) throw new Error("Realtime ticket unavailable");
+      if (!authToken) { realtimeConnecting = false; return; }
+      realtimeSocket = new WebSocket(`${protocol}://${location.host}/ws/?ticket=${encodeURIComponent(ticketResult.ticket)}`);
       realtimeSocket.onopen = () => { if (current) subscribeRealtime(current); };
       realtimeSocket.onmessage = event => {
         let packet;
@@ -531,10 +567,21 @@
           }).catch(() => {});
           return;
         }
+        if (packet.type === "presence") {
+          loadChats();
+          return;
+        }
         if (packet.type === "typing" && packet.chatId === current) {
           $("typing").textContent = packet.active ? `${packet.name} печатает…` : "";
           clearTimeout(typingTimer);
           if (packet.active) typingTimer = setTimeout(() => { $("typing").textContent = ""; }, 2500);
+          return;
+        }
+        if (packet.type === "delivered" && packet.chatId) {
+          const deliveredChat = chats.find(item => item.id === packet.chatId);
+          const deliveredMessage = deliveredChat?.msgs?.find(message => message.id === packet.messageId);
+          if (deliveredMessage) deliveredMessage.delivered = true;
+          if (packet.chatId === current) renderConv();
           return;
         }
         if (packet.type !== "message" || !packet.chatId || !packet.message) return;
@@ -544,10 +591,11 @@
         if (current === chat.id) renderConv();
         renderChats();
       };
-      realtimeSocket.onclose = () => { realtimeSocket = null; };
+      realtimeSocket.onclose = () => { realtimeSocket = null; realtimeConnecting = false; };
       realtimeSocket.onerror = () => { realtimeSocket.close(); };
     } catch (_) {
       realtimeSocket = null;
+      realtimeConnecting = false;
     }
   }
 
@@ -566,7 +614,7 @@
     $("chats").innerHTML = visibleChats().map(c => {
       const last = lastOf(c) || { text: "", t: "" };
       const prefix = last.out ? "Вы: " : (c.type === "group" && last.from ? `${last.from}: ` : "");
-      const ticks = last.out ? `<span class="ticks">${last.read ? "✓✓" : "✓"}</span>` : "";
+      const ticks = last.out ? `<span class="ticks">${last.read || last.delivered ? "✓✓" : "✓"}</span>` : "";
       return `
         <div class="chat-item ${current === c.id ? "active" : ""}" data-id="${c.id}">
           <div class="avatar ${c.color}">${initials(c.name)}${c.type === "direct" && c.online ? '<span class="online"></span>' : ""}</div>
@@ -636,6 +684,8 @@
       if (isOut) {
         if (seenCount > 0) {
           readIndicator = `<span class="seen-trigger" onclick="openSeenModal(${idx})" title="Нажмите, чтобы увидеть кто прочитал">✓✓ <span class="seen-badge">${seenCount}</span></span>`;
+        } else if (m.delivered) {
+          readIndicator = `<span class="ticks" title="Доставлено">✓✓</span>`;
         } else {
           readIndicator = `<span class="ticks">✓</span>`;
         }
@@ -706,11 +756,18 @@
 
   async function postCallEvent(type, payload = "") {
     if (!activeCall) return;
-    await fetch(`/api/calls/${encodeURIComponent(activeCall.id)}/events`, {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ type, payload })
-    });
+    try {
+      const response = await fetch(`/api/calls/${encodeURIComponent(activeCall.id)}/events`, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ type, payload })
+      });
+      if (!response.ok) throw new Error(`call event HTTP ${response.status}`);
+      return true;
+    } catch (_) {
+      $("callStatus").textContent = "РћС€РёР±РєР° СЃРёРіРЅР°Р»РёР·Р°С†РёРё";
+      return false;
+    }
   }
 
   async function beginCall(call, initiator) {
@@ -722,7 +779,7 @@
       if (iceResponse.ok) iceServers = (await iceResponse.json()).iceServers || iceServers;
     } catch (_) { /* public STUN remains a usable fallback */ }
     const peer = new RTCPeerConnection({ iceServers });
-    activeCall = { ...call, peer, stream, lastEvent: 0 };
+    activeCall = { ...call, peer, stream, lastEvent: 0, pendingCandidates: [], pollDelay: 700 };
     $("callModal").style.display = "flex";
     $("callTitle").textContent = wantsVideo ? "Видеозвонок" : "Аудиозвонок";
     $("callStatus").textContent = initiator ? "Ожидание ответа…" : "Подключение…";
@@ -764,19 +821,31 @@
       return;
     }
     try { await beginCall(call, true); }
-    catch (_) { $("typing").textContent = "Нет доступа к камере или микрофону"; }
+    catch (_) {
+      if (activeCall) await endCall(true);
+      else await fetch(`/api/calls/${encodeURIComponent(call.id)}/events`, {
+        method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ type: "reject", payload: "" })
+      }).catch(() => {});
+      $("typing").textContent = "Нет доступа к камере или микрофону";
+    }
   }
 
   async function pollCallEvents() {
     if (!activeCall) return;
-    const response = await fetch(`/api/calls/${encodeURIComponent(activeCall.id)}/events?after=${activeCall.lastEvent}`, { headers: authHeaders() });
-    if (!response.ok) return;
-    const events = await response.json();
+    try {
+      const response = await fetch(`/api/calls/${encodeURIComponent(activeCall.id)}/events?after=${activeCall.lastEvent}`, { headers: authHeaders() });
+      if (!response.ok) throw new Error(`call events HTTP ${response.status}`);
+      const events = await response.json();
+      activeCall.pollDelay = 700;
     for (const event of events) {
       activeCall.lastEvent = Math.max(activeCall.lastEvent, event.id);
       if (event.sender === currentUser.username) continue;
       if (event.type === "offer") {
         await activeCall.peer.setRemoteDescription(JSON.parse(event.payload));
+        for (const candidate of activeCall.pendingCandidates.splice(0)) {
+          await activeCall.peer.addIceCandidate(candidate);
+        }
         const answer = await activeCall.peer.createAnswer();
         await activeCall.peer.setLocalDescription(answer);
         await postCallEvent("answer", JSON.stringify(answer));
@@ -784,15 +853,25 @@
         $("callStatus").textContent = "Соединение установлено";
       } else if (event.type === "answer") {
         await activeCall.peer.setRemoteDescription(JSON.parse(event.payload));
+        for (const candidate of activeCall.pendingCandidates.splice(0)) {
+          await activeCall.peer.addIceCandidate(candidate);
+        }
         $("callStatus").textContent = "Соединение установлено";
       } else if (event.type === "candidate") {
-        await activeCall.peer.addIceCandidate(JSON.parse(event.payload));
+        const candidate = JSON.parse(event.payload);
+        if (activeCall.peer.remoteDescription) await activeCall.peer.addIceCandidate(candidate);
+        else activeCall.pendingCandidates.push(candidate);
       } else if (event.type === "reject" || event.type === "end") {
         await endCall(false);
         return;
       }
     }
-    if (activeCall) callPollTimer = setTimeout(pollCallEvents, 700);
+    } catch (_) {
+      if (!activeCall) return;
+      activeCall.pollDelay = Math.min(Math.round(activeCall.pollDelay * 1.7), 5000);
+      $("callStatus").textContent = "РџРѕРґРєР»СЋС‡РµРЅРёРµ РІРѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµС‚СЃСЏвЂ¦";
+    }
+    if (activeCall) callPollTimer = setTimeout(pollCallEvents, activeCall.pollDelay);
   }
 
   async function endCall(notify = true) {
@@ -809,17 +888,24 @@
 
   async function checkIncomingCalls() {
     if (!authToken || activeCall || incomingCallId) return;
-    const response = await fetch("/api/calls/incoming", { headers: authHeaders() });
-    if (!response.ok) return;
-    const calls = await response.json();
+    let calls;
+    try {
+      const response = await fetch("/api/calls/incoming", { headers: authHeaders() });
+      if (!response.ok) return;
+      calls = await response.json();
+    } catch (_) {
+      return;
+    }
     const call = calls[0];
     if (!call || call.id === incomingCallId) return;
     incomingCallId = call.id;
     if (window.confirm(`${call.caller} вызывает вас (${call.mediaType}). Принять?`)) {
       try { await beginCall(call, false); }
-      catch (_) { await fetch(`/api/calls/${encodeURIComponent(call.id)}/events`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ type: "reject", payload: "" }) }); }
+      catch (_) {
+        await fetch(`/api/calls/${encodeURIComponent(call.id)}/events`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ type: "reject", payload: "" }) }).catch(() => {});
+      }
     } else {
-      await fetch(`/api/calls/${encodeURIComponent(call.id)}/events`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ type: "reject", payload: "" }) });
+      await fetch(`/api/calls/${encodeURIComponent(call.id)}/events`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ type: "reject", payload: "" }) }).catch(() => {});
     }
     incomingCallId = null;
   }
@@ -1027,14 +1113,8 @@
     currentUser = result;
     localStorage.setItem("tlsChatToken", authToken);
     localStorage.setItem("tlsChatUser", JSON.stringify(result));
-    connectRealtime();
-    $("whoami").textContent = `${result.displayName} · ${result.profession}`;
     $("empty").style.display = "none";
-    await loadChats();
-    await loadCeoUsers();
-    await checkNotifications();
-    $("profileBtn").style.display = "block";
-    $("logout").style.display = "block";
+    await activateAuthenticatedSession();
   });
 
   $("profileBtn").addEventListener("click", openProfile);
@@ -1086,18 +1166,18 @@
     }
   });
 
-  if (authToken && currentUser) {
-    $("whoami").textContent = `${currentUser.displayName} · ${currentUser.profession}`;
-    $("logout").style.display = "block";
-    $("profileBtn").style.display = "block";
-    connectRealtime();
-    loadChats().then(loadCeoUsers).then(checkNotifications).catch(() => {
+  (async () => {
+    try {
+      await acceptBrowserHandoff();
+      if (authToken && currentUser) await activateAuthenticatedSession();
+    } catch (_) {
       localStorage.removeItem("tlsChatToken");
       localStorage.removeItem("tlsChatUser");
       authToken = null;
       currentUser = null;
-    });
-  }
+      if (browserHandoffCode) $("loginStatus").textContent = "Ссылка Desktop-клиента истекла; войдите вручную";
+    }
+  })();
 
   window.openSeenModal = function(msgIdx) {
     const c = chats.find(x => x.id === current);

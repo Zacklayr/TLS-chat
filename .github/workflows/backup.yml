@@ -1,0 +1,43 @@
+name: TLS-Chat encrypted backup
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    environment: heroku
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Validate backup secrets
+        shell: bash
+        run: |
+          test -n "$DATABASE_URL" || { echo "DATABASE_URL is not configured"; exit 1; }
+          test -n "$BACKUP_ENCRYPTION_KEY" || { echo "BACKUP_ENCRYPTION_KEY is not configured"; exit 1; }
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+      - name: Build backup utility
+        run: mvn -B -DskipTests package
+      - name: Create encrypted PostgreSQL backup
+        shell: pwsh
+        run: ./infra/backup.ps1 -UsePostgresDump -OutputDir ./backups
+      - name: Upload encrypted backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls-chat-encrypted-backup-${{ github.run_id }}
+          path: backups/*.backup.enc
+          retention-days: 30

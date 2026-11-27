@@ -31,6 +31,11 @@ public final class ChatRepository implements AutoCloseable {
             "cybersecurity_lead", "language_lead", "equipment_lead", "wellbeing_lead",
             "design_lead", "game_design_lead", "scenario_lead", "sound_lead"
     );
+    private static final Set<String> LEADERSHIP_PERMISSIONS = Set.of(
+            "ceo", "department_lead", "engine_lead", "integration_lead", "porting_lead",
+            "support_lead", "cybersecurity_lead", "language_lead", "equipment_lead",
+            "wellbeing_lead", "design_lead", "game_design_lead", "scenario_lead", "sound_lead"
+    );
 
     private final String normalizedJdbcUrl;
     private final boolean postgres;
@@ -55,6 +60,14 @@ public final class ChatRepository implements AutoCloseable {
             connection = java.sql.DriverManager.getConnection(normalizedJdbcUrl);
         }
         return connection;
+    }
+
+    public synchronized boolean isHealthy() {
+        try {
+            return conn().isValid(2);
+        } catch (SQLException e) {
+            return false;
+        }
     }
 
     private void initialize() throws SQLException {
@@ -378,13 +391,10 @@ public final class ChatRepository implements AutoCloseable {
             throw new IllegalArgumentException("Укажите id, тип, название и цвет чата");
         }
         String normalizedPermissions = normalizePermissions(writePermissions);
-        String sql = postgres
-                ? "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, name = EXCLUDED.name, " +
-                "color = EXCLUDED.color, profession_rule = EXCLUDED.profession_rule, workplace_rule = EXCLUDED.workplace_rule, " +
-                "region_rule = EXCLUDED.region_rule, write_permissions = EXCLUDED.write_permissions"
-                : "INSERT OR REPLACE INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        String sql = "INSERT INTO chats(id, type, name, color, profession_rule, workplace_rule, region_rule, write_permissions) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET type = excluded.type, name = excluded.name, " +
+                "color = excluded.color, profession_rule = excluded.profession_rule, workplace_rule = excluded.workplace_rule, " +
+                "region_rule = excluded.region_rule, write_permissions = excluded.write_permissions";
         try (PreparedStatement statement = conn().prepareStatement(sql)) {
             statement.setString(1, id);
             statement.setString(2, type.trim());
@@ -506,7 +516,8 @@ public final class ChatRepository implements AutoCloseable {
                         String regRule = chatResult.getString("region_rule");
 
                         boolean isLeaderChat = "leaders".equals(chatId);
-                        boolean matchesLeader = isLeaderChat && (permsSet.contains("ceo") || permsSet.contains("department_lead"));
+                        boolean matchesLeader = isLeaderChat && !java.util.Collections.disjoint(
+                                permsSet, LEADERSHIP_PERMISSIONS);
 
                         if (matchesLeader || (matchesRule(profRule, userProf) && matchesRule(workRule, userWork) && matchesRule(regRule, userReg))) {
                             insertMembership(chatId, username);
@@ -541,6 +552,44 @@ public final class ChatRepository implements AutoCloseable {
             }
         }
         return chats;
+    }
+
+    public synchronized List<String> adminChatMembers(String chatId) throws SQLException {
+        if (!chatExists(chatId)) {
+            throw new IllegalArgumentException("Chat not found");
+        }
+        List<String> members = new ArrayList<>();
+        try (PreparedStatement statement = conn().prepareStatement(
+                "SELECT cm.username FROM chat_members cm JOIN users u ON u.username = cm.username "
+                        + "WHERE cm.chat_id = ? ORDER BY u.display_name, cm.username")) {
+            statement.setString(1, chatId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    members.add(result.getString("username"));
+                }
+            }
+        }
+        return members;
+    }
+
+    public synchronized void setChatMember(String chatId, String username, boolean member) throws SQLException {
+        if (!chatExists(chatId)) {
+            throw new IllegalArgumentException("Chat not found");
+        }
+        String normalizedUsername = username == null ? "" : username.trim().toLowerCase(Locale.ROOT);
+        if (normalizedUsername.isBlank() || findApprovedUser(normalizedUsername) == null) {
+            throw new IllegalArgumentException("Only an approved user can be assigned to a chat");
+        }
+        if (member) {
+            insertMembership(chatId, normalizedUsername);
+        } else {
+            try (PreparedStatement statement = conn().prepareStatement(
+                    "DELETE FROM chat_members WHERE chat_id = ? AND username = ?")) {
+                statement.setString(1, chatId);
+                statement.setString(2, normalizedUsername);
+                statement.executeUpdate();
+            }
+        }
     }
 
     public synchronized List<AdminUser> adminUsers() throws SQLException {
@@ -1093,21 +1142,7 @@ public final class ChatRepository implements AutoCloseable {
             throw new IllegalArgumentException("Chat is not available");
         }
         boolean isAnonymous = "anonymous".equals(chatId);
-        // Mark existing messages as read by this user
-        if (username != null && !username.isBlank() && !isAnonymous) {
-            String insertReadsSql = postgres
-                    ? "INSERT INTO message_reads(message_id, username, read_at) " +
-                      "SELECT id, ?, ? FROM messages WHERE chat_id = ? " +
-                      "ON CONFLICT DO NOTHING"
-                    : "INSERT OR IGNORE INTO message_reads(message_id, username, read_at) " +
-                      "SELECT id, ?, ? FROM messages WHERE chat_id = ?";
-            try (PreparedStatement readStmt = conn().prepareStatement(insertReadsSql)) {
-                readStmt.setString(1, username);
-                readStmt.setString(2, Instant.now().toString());
-                readStmt.setString(3, chatId);
-                readStmt.executeUpdate();
-            }
-        }
+        markMessagesRead(chatId, username);
 
         // Build mapping of message_id -> seenBy readers
         Map<Long, List<String>> readsMap = new HashMap<>();
@@ -1166,6 +1201,24 @@ public final class ChatRepository implements AutoCloseable {
             }
         }
         return messages;
+    }
+
+    public synchronized void markMessagesRead(String chatId, String username) throws SQLException {
+        if (!chatExists(chatId) || !isMember(chatId, username)) {
+            throw new IllegalArgumentException("Chat is not available");
+        }
+        if (username == null || username.isBlank() || "anonymous".equals(chatId)) return;
+        String insertReadsSql = postgres
+                ? "INSERT INTO message_reads(message_id, username, read_at) " +
+                  "SELECT id, ?, ? FROM messages WHERE chat_id = ? ON CONFLICT DO NOTHING"
+                : "INSERT OR IGNORE INTO message_reads(message_id, username, read_at) " +
+                  "SELECT id, ?, ? FROM messages WHERE chat_id = ?";
+        try (PreparedStatement readStmt = conn().prepareStatement(insertReadsSql)) {
+            readStmt.setString(1, username);
+            readStmt.setString(2, Instant.now().toString());
+            readStmt.setString(3, chatId);
+            readStmt.executeUpdate();
+        }
     }
 
     public synchronized Message addMessage(String chatId, String sender, String permissions, String text)

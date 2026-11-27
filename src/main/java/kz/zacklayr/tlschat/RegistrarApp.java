@@ -69,6 +69,23 @@ public final class RegistrarApp {
     private JCheckBox hiddenData;
     private JCheckBox manageUsers;
     private JCheckBox manageChats;
+    private final List<PermissionChoice> specialistPermissions = new ArrayList<>();
+
+    private static final String[][] SPECIALIST_PERMISSIONS = {
+            {"ceo", "Генеральный директор"},
+            {"engine_lead", "Руководитель движка"},
+            {"integration_lead", "Руководитель интеграций"},
+            {"porting_lead", "Руководитель портирования"},
+            {"support_lead", "Руководитель техподдержки"},
+            {"cybersecurity_lead", "Руководитель кибербезопасности"},
+            {"language_lead", "Руководитель локализации и языков"},
+            {"equipment_lead", "Руководитель оборудования и закупок"},
+            {"wellbeing_lead", "Ответственный за благополучие сотрудников"},
+            {"design_lead", "Главный по дизайну"},
+            {"game_design_lead", "Главный по геймдизайну"},
+            {"scenario_lead", "Главный сценарист"},
+            {"sound_lead", "Главный по звуку"}
+    };
 
     private RegistrarApp(String defaultServerUrl) {
         this.defaultServerUrl = defaultServerUrl;
@@ -151,6 +168,10 @@ public final class RegistrarApp {
         hiddenData = permission("Просматривать скрытые данные", details);
         manageUsers = permission("Управлять пользователями", details);
         manageChats = permission("Управлять чатами", details);
+        for (String[] specialist : SPECIALIST_PERMISSIONS) {
+            specialistPermissions.add(new PermissionChoice(specialist[0],
+                    permission(specialist[1], details)));
+        }
         JButton approve = new JButton("Одобрить");
         JButton reject = new JButton("Отклонить");
         JButton refresh = new JButton("Обновить заявки");
@@ -312,6 +333,9 @@ public final class RegistrarApp {
         if (hiddenData.isSelected()) selected.add("hidden_data");
         if (manageUsers.isSelected()) selected.add("manage_users");
         if (manageChats.isSelected()) selected.add("manage_chats");
+        for (PermissionChoice specialist : specialistPermissions) {
+            if (specialist.checkbox().isSelected()) selected.add(specialist.permission());
+        }
         return String.join(",", selected);
     }
 
@@ -324,6 +348,9 @@ public final class RegistrarApp {
         hiddenData.setSelected(selected.contains("hidden_data"));
         manageUsers.setSelected(selected.contains("manage_users"));
         manageChats.setSelected(selected.contains("manage_chats"));
+        for (PermissionChoice specialist : specialistPermissions) {
+            specialist.checkbox().setSelected(selected.contains(specialist.permission()));
+        }
     }
 
     private static List<RegistrationRequest> parseRequests(String json) {
@@ -379,6 +406,9 @@ public final class RegistrarApp {
     private record RegistrationRequest(String id, String fullName, String profession,
                                        String workplace, String region, String phone,
                                        String permissions) {
+    }
+
+    private record PermissionChoice(String permission, JCheckBox checkbox) {
     }
 
     private static final class RequestTableModel extends AbstractTableModel {

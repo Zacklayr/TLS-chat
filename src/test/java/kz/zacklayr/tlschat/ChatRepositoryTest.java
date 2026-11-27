@@ -25,6 +25,14 @@ class ChatRepositoryTest {
     }
 
     @Test
+    void reportsHealthyDatabaseConnection() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            assertTrue(repository.isHealthy());
+        }
+    }
+
+    @Test
     void storesAndApprovesRegistrationWithRoles() throws Exception {
         database = Files.createTempFile("tls-chat-test-", ".db");
         try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
@@ -160,9 +168,52 @@ class ChatRepositoryTest {
             account = repository.authenticate("employee", "pass123");
             assertTrue(repository.findChatsForUser(account).stream().anyMatch(c -> "leaders".equals(c.id())));
 
-            repository.updateUserAccess("employee", "SUSPENDED", "department_lead");
+            repository.setUserPermissions("employee", "engine_lead");
+            account = repository.authenticate("employee", "pass123");
+            assertTrue(repository.findChatsForUser(account).stream().anyMatch(c -> "leaders".equals(c.id())));
+
+            repository.updateUserAccess("employee", "SUSPENDED", "engine_lead");
             assertTrue(repository.findChatsForUser(account).stream().noneMatch(c -> "leaders".equals(c.id())));
             assertThrows(IllegalArgumentException.class, () -> repository.authenticate("employee", "pass123"));
+        }
+    }
+
+    @Test
+    void administratorMembershipOperationsOnlyAllowApprovedUsers() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration application = repository.registerApplication(
+                    "Member Example", "Developer", "Avengers", "Almaty", "+77001234567");
+            repository.decideRegistration(application.id(), "APPROVED", "Member Example", "Developer",
+                    "Avengers", "Almaty", "+77001234567", "", "member", "pass123");
+
+            repository.setChatMember("general", "member", true);
+            assertTrue(repository.adminChatMembers("general").contains("member"));
+            repository.setChatMember("general", "member", false);
+            assertTrue(!repository.adminChatMembers("general").contains("member"));
+            assertThrows(IllegalArgumentException.class,
+                    () -> repository.setChatMember("general", "missing", true));
+        }
+    }
+
+    @Test
+    void editingChatPreservesMessagesAndMemberships() throws Exception {
+        database = Files.createTempFile("tls-chat-test-", ".db");
+        try (ChatRepository repository = new ChatRepository("jdbc:sqlite:" + database)) {
+            ChatRepository.Registration application = repository.registerApplication(
+                    "Member Example", "Developer", "Avengers", "Almaty", "+77001234567");
+            repository.decideRegistration(application.id(), "APPROVED", "Member Example", "Developer",
+                    "Avengers", "Almaty", "+77001234567", "", "member", "pass123");
+            repository.assignChatsForUser("member");
+            repository.addMessage("general", "member", "global_write", "Before edit");
+
+            repository.createChat("general", "group", "General renamed", "c-green",
+                    "", "", "", "global_write");
+
+            assertTrue(repository.adminChatMembers("general").contains("member"));
+            assertEquals("Before edit", repository.findMessages("general", "member").get(0).text());
+            assertEquals("General renamed", repository.adminChats().stream()
+                    .filter(chat -> "general".equals(chat.id())).findFirst().orElseThrow().name());
         }
     }
 

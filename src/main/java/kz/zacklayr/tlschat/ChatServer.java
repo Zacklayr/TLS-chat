@@ -1,6 +1,8 @@
 package kz.zacklayr.tlschat;
 
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpContext;
+import com.sun.net.httpserver.Filter;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpsExchange;
 import com.sun.net.httpserver.HttpsConfigurator;
@@ -10,6 +12,7 @@ import com.sun.net.httpserver.HttpsServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.ByteArrayInputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -21,19 +24,28 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.UUID;
 
 public final class ChatServer implements AutoCloseable {
     private static final long MAX_ATTACHMENT_BYTES = 25L * 1024 * 1024;
+    private static final long MAX_JSON_BODY_BYTES = 64L * 1024;
+    private static final int MAX_LOGIN_FAILURES = 5;
+    private static final long LOGIN_BLOCK_SECONDS = 15 * 60;
     private final HttpServer server;
     private final ChatRepository repository;
     private final AttachmentStorage attachmentStorage;
     private final GitHubService githubService = new GitHubService();
     private final ScheduledExecutorService scheduledCallDispatcher = Executors.newSingleThreadScheduledExecutor();
+    private final Map<String, LoginThrottle> loginThrottle = new ConcurrentHashMap<>();
+    private final Map<String, BrowserHandoff> browserHandoffs = new ConcurrentHashMap<>();
+    private final WebSocketTicketStore webSocketTickets = new WebSocketTicketStore();
     private ChatWebSocketServer webSocketServer;
     public ChatServer(int port, Path database) throws IOException, SQLException {
         String databaseUrl = System.getenv("DATABASE_URL");
@@ -42,21 +54,68 @@ public final class ChatServer implements AutoCloseable {
                 : databaseUrl);
         attachmentStorage = AttachmentStorage.fromEnvironment();
         server = createServer(port);
-        server.createContext("/api/registration", this::handleRegistration);
-        server.createContext("/api/login", this::handleLogin);
-        server.createContext("/api/logout", this::handleLogout);
-        server.createContext("/health", this::handleHealth);
-        server.createContext("/api/files", this::handleFiles);
-        server.createContext("/api/calls", this::handleCalls);
-        server.createContext("/api/profile", this::handleProfile);
-        server.createContext("/api/notifications", this::handleNotifications);
-        server.createContext("/api/registrar", this::handleRegistrar);
-        server.createContext("/api/admin", this::handleAdmin);
-        server.createContext("/api/chats", this::handleChats);
-        server.createContext("/api/users", this::handleUsers);
+        registerApiContext("/api/registration", this::handleRegistration, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/login", this::handleLogin, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/browser-handoff", this::handleBrowserHandoff, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/realtime-ticket", this::handleRealtimeTicket, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/logout", this::handleLogout, MAX_JSON_BODY_BYTES);
+        registerApiContext("/health", this::handleHealth, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/files", this::handleFiles, MAX_ATTACHMENT_BYTES);
+        registerApiContext("/api/calls", this::handleCalls, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/profile", this::handleProfile, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/notifications", this::handleNotifications, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/registrar", this::handleRegistrar, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/admin", this::handleAdmin, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/chats", this::handleChats, MAX_JSON_BODY_BYTES);
+        registerApiContext("/api/users", this::handleUsers, MAX_JSON_BODY_BYTES);
         server.createContext("/photos", this::handlePhotos);
         server.createContext("/", this::handlePage);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    private void registerApiContext(String path, com.sun.net.httpserver.HttpHandler handler, long maxBytes) {
+        HttpContext context = server.createContext(path, handler);
+        context.getFilters().add(new MaxRequestBodyFilter(maxBytes));
+    }
+
+    private static final class MaxRequestBodyFilter extends Filter {
+        private final long maxBytes;
+
+        private MaxRequestBodyFilter(long maxBytes) {
+            this.maxBytes = maxBytes;
+        }
+
+        @Override
+        public String description() {
+            return "Reject request bodies larger than the endpoint limit";
+        }
+
+        @Override
+        public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+            String contentLength = exchange.getRequestHeaders().getFirst("Content-Length");
+            if (contentLength != null) {
+                try {
+                    if (Long.parseLong(contentLength) > maxBytes) {
+                        writeJson(exchange, 413, "{\"error\":\"Request body is too large\"}");
+                        return;
+                    }
+                } catch (NumberFormatException ignored) {
+                    writeJson(exchange, 400, "{\"error\":\"Invalid Content-Length\"}");
+                    return;
+                }
+            }
+            if (contentLength == null && maxBytes <= MAX_JSON_BODY_BYTES
+                    && !"GET".equalsIgnoreCase(exchange.getRequestMethod())
+                    && !"HEAD".equalsIgnoreCase(exchange.getRequestMethod())) {
+                byte[] body = exchange.getRequestBody().readNBytes((int) maxBytes + 1);
+                if (body.length > maxBytes) {
+                    writeJson(exchange, 413, "{\"error\":\"Request body is too large\"}");
+                    return;
+                }
+                exchange.setStreams(new ByteArrayInputStream(body), exchange.getResponseBody());
+            }
+            chain.doFilter(exchange);
+        }
     }
 
     private HttpServer createServer(int port) throws IOException {
@@ -102,8 +161,20 @@ public final class ChatServer implements AutoCloseable {
                 return;
             }
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            ChatRepository.UserAccount account = repository.authenticate(
-                    jsonValue(body, "username"), jsonValue(body, "password"));
+            String username = jsonValue(body, "username").trim().toLowerCase(Locale.ROOT);
+            String throttleKey = loginThrottleKey(exchange, username);
+            if (!loginAllowed(throttleKey)) {
+                writeJson(exchange, 429, "{\"error\":\"Too many failed login attempts; try again later\"}");
+                return;
+            }
+            ChatRepository.UserAccount account;
+            try {
+                account = repository.authenticate(username, jsonValue(body, "password"));
+            } catch (IllegalArgumentException e) {
+                recordLoginFailure(throttleKey);
+                throw e;
+            }
+            loginThrottle.remove(throttleKey);
             String token = repository.createSession("USER", account.username());
             repository.updatePresence(account.username(), "online");
             writeJson(exchange, 200, "{\"token\":\"" + token + "\",\"username\":\"" +
@@ -122,6 +193,112 @@ public final class ChatServer implements AutoCloseable {
         }
     }
 
+    private void handleBrowserHandoff(HttpExchange exchange) throws IOException {
+        try {
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            if ("POST".equals(exchange.getRequestMethod())) {
+                ChatRepository.UserAccount account = authenticatedUser(exchange);
+                if (account == null) {
+                    writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+                    return;
+                }
+                Instant now = Instant.now();
+                browserHandoffs.entrySet().removeIf(entry -> !entry.getValue().expiresAt().isAfter(now));
+                String code = UUID.randomUUID().toString().replace("-", "");
+                browserHandoffs.put(code, new BrowserHandoff(account, now.plusSeconds(60)));
+                writeJson(exchange, 201, "{\"code\":\"" + code + "\",\"expiresInSeconds\":60}");
+                return;
+            }
+            if ("GET".equals(exchange.getRequestMethod())) {
+                String code = queryParameter(exchange.getRequestURI().getRawQuery(), "code");
+                BrowserHandoff handoff = browserHandoffs.remove(code);
+                if (handoff == null || !handoff.expiresAt().isAfter(Instant.now())) {
+                    writeJson(exchange, 410, "{\"error\":\"Handoff code expired or already used\"}");
+                    return;
+                }
+                String token = repository.createSession("USER", handoff.account().username());
+                writeJson(exchange, 200, loginJson(token, handoff.account()));
+                return;
+            }
+            writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } catch (IllegalArgumentException e) {
+            writeJson(exchange, 400, "{\"error\":\"Invalid handoff code\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private static String loginJson(String token, ChatRepository.UserAccount account) {
+        return "{\"token\":\"" + escape(token) + "\",\"username\":\"" +
+                escape(account.username()) + "\",\"displayName\":\"" +
+                escape(account.displayName()) + "\",\"profession\":\"" +
+                escape(account.profession()) + "\",\"workplace\":\"" +
+                escape(account.workplace()) + "\",\"region\":\"" +
+                escape(account.region()) + "\",\"permissions\":\"" +
+                escape(account.permissions()) + "\"}";
+    }
+
+    private void handleRealtimeTicket(HttpExchange exchange) throws IOException {
+        try {
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            ChatRepository.UserAccount account = authenticatedUser(exchange);
+            if (account == null) {
+                writeJson(exchange, 401, "{\"error\":\"Login required\"}");
+                return;
+            }
+            String ticket = webSocketTickets.issue(account.username());
+            writeJson(exchange, 201, "{\"ticket\":\"" + ticket + "\",\"expiresInSeconds\":"
+                    + WebSocketTicketStore.lifetimeSeconds() + "}");
+        } catch (SQLException e) {
+            writeJson(exchange, 500, "{\"error\":\"Database error\"}");
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private static String queryParameter(String query, String name) {
+        if (query == null || query.isBlank()) return "";
+        for (String part : query.split("&")) {
+            int separator = part.indexOf('=');
+            String key = separator < 0 ? part : part.substring(0, separator);
+            if (name.equals(URLDecoder.decode(key, StandardCharsets.UTF_8))) {
+                return separator < 0 ? "" : URLDecoder.decode(part.substring(separator + 1), StandardCharsets.UTF_8);
+            }
+        }
+        return "";
+    }
+
+    private String loginThrottleKey(HttpExchange exchange, String username) {
+        String address = exchange.getRemoteAddress().getAddress() == null
+                ? "unknown" : exchange.getRemoteAddress().getAddress().getHostAddress();
+        return address + "|" + username;
+    }
+
+    private boolean loginAllowed(String key) {
+        LoginThrottle state = loginThrottle.get(key);
+        if (state == null) return true;
+        if (!Instant.MIN.equals(state.blockedUntil())) {
+            if (state.blockedUntil().isAfter(Instant.now())) return false;
+            loginThrottle.remove(key, state);
+        }
+        return true;
+    }
+
+    private void recordLoginFailure(String key) {
+        loginThrottle.compute(key, (ignored, current) -> {
+            int failures = current == null ? 1 : current.failures() + 1;
+            Instant blockedUntil = failures >= MAX_LOGIN_FAILURES
+                    ? Instant.now().plusSeconds(LOGIN_BLOCK_SECONDS) : Instant.MIN;
+            return new LoginThrottle(failures, blockedUntil);
+        });
+    }
+
     private void handleLogout(HttpExchange exchange) throws IOException {
         try {
             if (!"POST".equals(exchange.getRequestMethod())) {
@@ -133,7 +310,9 @@ public final class ChatServer implements AutoCloseable {
                 String token = header.substring("Bearer ".length()).trim();
                 ChatRepository.Session session = repository.findSession(token);
                 if (session != null && session.username() != null && !session.username().isBlank()) {
-                    repository.updatePresence(session.username(), "offline");
+                    if (webSocketServer == null || !webSocketServer.hasActiveUser(session.username())) {
+                        repository.updatePresence(session.username(), "offline");
+                    }
                 }
                 repository.deleteSession(token);
             }
@@ -151,7 +330,9 @@ public final class ChatServer implements AutoCloseable {
                 writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
                 return;
             }
-            writeJson(exchange, 200, "{\"status\":\"ok\"}");
+            boolean healthy = repository.isHealthy();
+            writeJson(exchange, healthy ? 200 : 503,
+                    healthy ? "{\"status\":\"ok\"}" : "{\"status\":\"unavailable\"}");
         } finally {
             exchange.close();
         }
@@ -398,9 +579,12 @@ public final class ChatServer implements AutoCloseable {
         server.start();
         scheduledCallDispatcher.scheduleWithFixedDelay(this::dispatchDueScheduledCalls, 5, 15, TimeUnit.SECONDS);
         String websocketPort = System.getenv("WS_PORT");
+        if (websocketPort == null || websocketPort.isBlank()) {
+            websocketPort = System.getProperty("tlschat.wsPort", "");
+        }
         if (websocketPort != null && !websocketPort.isBlank()) {
             try {
-                webSocketServer = new ChatWebSocketServer(Integer.parseInt(websocketPort), repository);
+                webSocketServer = new ChatWebSocketServer(Integer.parseInt(websocketPort), repository, webSocketTickets);
                 webSocketServer.start();
             } catch (NumberFormatException e) {
                 throw new IllegalStateException("WS_PORT must be a number", e);
@@ -562,6 +746,23 @@ public final class ChatServer implements AutoCloseable {
                 writeJson(exchange, 201, chatJson(chat));
                 return;
             }
+            String membersPrefix = "/api/admin/chats/";
+            if (path.startsWith(membersPrefix) && path.endsWith("/members")) {
+                String chatId = URLDecoder.decode(path.substring(membersPrefix.length(), path.length() - "/members".length()), StandardCharsets.UTF_8);
+                if ("GET".equals(exchange.getRequestMethod())) {
+                    writeJson(exchange, 200, stringsJson(repository.adminChatMembers(chatId)));
+                    return;
+                }
+                if ("POST".equals(exchange.getRequestMethod())) {
+                    String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                    boolean add = !"remove".equalsIgnoreCase(optionalJsonValue(body, "action", "add"));
+                    repository.setChatMember(chatId, jsonValue(body, "username"), add);
+                    writeJson(exchange, 200, stringsJson(repository.adminChatMembers(chatId)));
+                    return;
+                }
+                writeJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
             if ("/api/admin/users".equals(path) && "GET".equals(exchange.getRequestMethod())) {
                 writeJson(exchange, 200, adminUsersJson(repository.adminUsers()));
                 return;
@@ -712,9 +913,9 @@ public final class ChatServer implements AutoCloseable {
                     }
                     broadcastMessage("marsel-cat", repository.addMessage("marsel-cat", "Марсель 🐾", "", meow));
                 } else if ("helpdesk".equals(chatId) && !account.permissions().contains("support_agent")) {
-                    String autoReply = "🤖 Бот техподдержки: Здравствуйте, " + account.displayName() +
-                            "! Ваше обращение принято: «" + text + "». Дежурный специалист техподдержки уже видит ваш запрос и ответит вам здесь!";
-                    broadcastMessage("helpdesk", repository.addMessage("helpdesk", "AI Helpdesk Bot", "", autoReply));
+                    HelpdeskBot.Reply reply = HelpdeskBot.answer(account.displayName(), text);
+                    broadcastMessage("helpdesk", repository.addMessage("helpdesk", "AI Helpdesk Bot", "",
+                            reply.text() + " Категория: " + reply.category() + (reply.urgent() ? " [СРОЧНО]" : "")));
                 }
                 return;
             } else {
@@ -1002,6 +1203,11 @@ public final class ChatServer implements AutoCloseable {
         return "[" + users.stream().map(ChatServer::adminUserJson).collect(Collectors.joining(",")) + "]";
     }
 
+    private static String stringsJson(List<String> values) {
+        return "[" + values.stream().map(value -> "\"" + escape(value) + "\"")
+                .collect(Collectors.joining(",")) + "]";
+    }
+
     private static String queryValue(String rawQuery, String key) {
         if (rawQuery == null || rawQuery.isBlank()) {
             return "";
@@ -1124,4 +1330,7 @@ public final class ChatServer implements AutoCloseable {
         System.out.println("TLS Chat server started: http://localhost:" + chatServer.port());
         shutdown.await();
     }
+
+    private record LoginThrottle(int failures, Instant blockedUntil) { }
+    private record BrowserHandoff(ChatRepository.UserAccount account, Instant expiresAt) { }
 }
